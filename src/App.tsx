@@ -3,14 +3,16 @@ import {
   Box, Braces, ChevronRight, CircleHelp, Code2, Eye, FolderOpen, Grid3X3,
   Menu, MoreVertical, Play, Plus, Save, Search, Settings, Trash2, X,
 } from 'lucide-react'
-import { CodeEditor } from './components/CodeEditor'
+import { CodeEditor, type CodeEditorHandle } from './components/CodeEditor'
 import { Licenses } from './components/Licenses'
 import { Modal } from './components/Modal'
 import { PanelDivider, type ResizeAxis, type ResizePoint } from './components/PanelDivider'
+import { SnippetPalette, type DropPoint } from './components/SnippetPalette'
 import { Toggle } from './components/Toggle'
 import { Viewer } from './components/Viewer'
 import { runJscad } from './jscadRunner'
 import { DEFAULT_SETTINGS, storage } from './storage'
+import type { PaletteItem } from './jscadApi'
 import { TEMPLATE_LABELS } from './templates'
 import type { AppSettings, DialogState, Project, ProjectIndex, ProjectTemplate } from './types'
 
@@ -64,6 +66,8 @@ export function App() {
   const [panels, setPanels] = useState<PanelLayout | null>(null)
   const panelsRef = useRef<PanelLayout | null>(null)
   const [resizeAxis, setResizeAxis] = useState<ResizeAxis | null>(null)
+  const [sidebarTab, setSidebarTab] = useState<'projects' | 'shapes'>('projects')
+  const editorApiRef = useRef<CodeEditorHandle | null>(null)
 
   const settings = index?.settings
   const motion = settings?.motion ?? true
@@ -314,6 +318,22 @@ export function App() {
     applyLayout({ splitRatio: clamp(offset / total, MIN_PANE / total, 1 - MIN_PANE / total) })
   }
 
+  const overEditor = (point: DropPoint | null) => {
+    if (!point) {
+      editorApiRef.current?.showDropTarget(null)
+      return false
+    }
+    const rect = editorRef.current?.getBoundingClientRect()
+    const inside = !!rect && point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom
+    editorApiRef.current?.showDropTarget(inside ? point : null)
+    return inside
+  }
+
+  const insertSnippet = (item: PaletteItem, point?: DropPoint) => {
+    editorApiRef.current?.insertSnippet({ code: item.code, requires: item.requires }, point)
+    editorApiRef.current?.showDropTarget(null)
+  }
+
   const resizeConsole = (point: ResizePoint, rect: DOMRect) => {
     const area = workspaceRef.current?.getBoundingClientRect()
     const panel = consoleRef.current?.getBoundingClientRect()
@@ -354,18 +374,34 @@ export function App() {
 
       <main className="workspace" ref={workspaceRef}>
         <aside className="sidebar">
-          <div className="panel-heading"><span>프로젝트</span><button className="icon-button tiny" onClick={openNewDialog} aria-label="새 프로젝트"><Plus size={17} /></button></div>
-          <label className="search-box"><Search size={15} /><input ref={searchRef} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="프로젝트 검색" /><kbd>Ctrl P</kbd></label>
-          <nav className="project-list">
-            {filteredProjects.map((item) => (
-              <button key={item.id} className={`project-item${item.id === project.id ? ' active' : ''}`} onClick={() => void switchProject(item.id)}>
-                <span className="project-icon"><Code2 size={17} /></span>
-                <span className="project-copy"><strong>{item.name}</strong><small>{formatTime(item.updatedAt)}</small></span>
-                {item.id === project.id && <span className="active-pip" />}
-              </button>
-            ))}
-          </nav>
-          <button className="new-project-button" onClick={openNewDialog}><Plus size={17} />새 프로젝트 <kbd>Ctrl N</kbd></button>
+          <div className="panel-heading">
+            <div className="sidebar-tabs" role="tablist">
+              <button role="tab" aria-selected={sidebarTab === 'projects'} className={sidebarTab === 'projects' ? 'selected' : ''} onClick={() => setSidebarTab('projects')}>프로젝트</button>
+              <button role="tab" aria-selected={sidebarTab === 'shapes'} className={sidebarTab === 'shapes' ? 'selected' : ''} onClick={() => setSidebarTab('shapes')}>도형</button>
+            </div>
+            {sidebarTab === 'projects' && <button className="icon-button tiny" onClick={openNewDialog} aria-label="새 프로젝트"><Plus size={17} /></button>}
+          </div>
+          {sidebarTab === 'projects' ? (
+            <>
+              <label className="search-box"><Search size={15} /><input ref={searchRef} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="프로젝트 검색" /><kbd>Ctrl P</kbd></label>
+              <nav className="project-list">
+                {filteredProjects.map((item) => (
+                  <button key={item.id} className={`project-item${item.id === project.id ? ' active' : ''}`} onClick={() => void switchProject(item.id)}>
+                    <span className="project-icon"><Code2 size={17} /></span>
+                    <span className="project-copy"><strong>{item.name}</strong><small>{formatTime(item.updatedAt)}</small></span>
+                    {item.id === project.id && <span className="active-pip" />}
+                  </button>
+                ))}
+              </nav>
+              <button className="new-project-button" onClick={openNewDialog}><Plus size={17} />새 프로젝트 <kbd>Ctrl N</kbd></button>
+            </>
+          ) : (
+            <SnippetPalette
+              onInsert={(item) => insertSnippet(item)}
+              onDrop={(item, point) => insertSnippet(item, point)}
+              onDragOver={overEditor}
+            />
+          )}
         </aside>
 
         <PanelDivider
@@ -388,6 +424,7 @@ export function App() {
           <CodeEditor
             value={project.code}
             fontSize={settings.fontSize}
+            apiRef={editorApiRef}
             onChange={(code) => { setProject((current) => current ? { ...current, code } : current); setDirty(true) }}
           />
         </section>
@@ -471,7 +508,7 @@ export function App() {
           </div>}
           {dialog.kind === 'licenses' && <Licenses />}
           {dialog.kind === 'shortcuts' && <div className="shortcut-grid">
-            <span>실행</span><kbd>Ctrl Enter</kbd><span>저장</span><kbd>Ctrl S</kbd><span>새 프로젝트</span><kbd>Ctrl N</kbd><span>프로젝트 검색</span><kbd>Ctrl P</kbd><span>프로젝트 패널</span><kbd>Ctrl B</kbd><span>출력 패널</span><kbd>Ctrl J</kbd><span>설정</span><kbd>Ctrl ,</kbd><span>창 닫기</span><kbd>Esc</kbd>
+            <span>실행</span><kbd>Ctrl Enter</kbd><span>저장</span><kbd>Ctrl S</kbd><span>새 프로젝트</span><kbd>Ctrl N</kbd><span>프로젝트 검색</span><kbd>Ctrl P</kbd><span>프로젝트 패널</span><kbd>Ctrl B</kbd><span>출력 패널</span><kbd>Ctrl J</kbd><span>설정</span><kbd>Ctrl ,</kbd><span>자동완성</span><kbd>Ctrl Space</kbd><span>창 닫기</span><kbd>Esc</kbd>
           </div>}
         </Modal>
       )}

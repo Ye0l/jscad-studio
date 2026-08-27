@@ -123,6 +123,40 @@ kbd { padding: 2px 5px; border: 1px solid #353b46; border-bottom-color: #4b5360;
 .panel-divider--console::after { inset: -5px 0; }
 .app-shell:not(.console-open) .panel-divider--console { display: none; }
 
+/* 사이드바 탭과 도형 팔레트 */
+.sidebar-tabs { display: flex; gap: 2px; }
+.sidebar-tabs button { padding: 5px 9px; border: 0; border-radius: 7px; background: transparent; color: #79818e; font-size: 11px; font-weight: 700; letter-spacing: .04em; cursor: pointer; transition: color 150ms var(--ease), background 150ms var(--ease); }
+.sidebar-tabs button:hover { color: #c3cad3; }
+.sidebar-tabs button.selected { color: #eef1f5; background: var(--surface-3); }
+
+.palette { min-height: 0; padding: 6px 7px 12px; display: flex; flex-direction: column; gap: 3px; overflow: auto; }
+.palette-group-head { width: 100%; min-height: 34px; padding: 0 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 0; border-radius: 7px; background: transparent; color: #b3bac4; font-size: 11px; font-weight: 600; cursor: pointer; transition: background 150ms var(--ease); }
+.palette-group-head:hover { background: #181b21; }
+.palette-group.open .palette-group-head { color: var(--accent); }
+.palette-group-head small { color: #59616d; font: 10px 'JetBrains Mono', monospace; }
+.palette-items { padding: 3px 0 7px; display: flex; flex-direction: column; gap: 3px; }
+.palette-item { padding: 8px 9px; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; border: 1px solid transparent; border-radius: 8px; background: #14171c; text-align: left; touch-action: none; transition: border-color 150ms var(--ease), background 150ms var(--ease); }
+.palette-item:hover { border-color: #2c323c; background: #181c22; }
+.palette-item.is-dragging { border-color: var(--accent); background: var(--accent-soft); }
+.palette-item strong { font-size: 11.5px; font-weight: 600; }
+.palette-item code { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #7fd9c6; font: 10px 'JetBrains Mono', monospace; }
+.palette-item small { color: var(--muted); font-size: 10px; line-height: 1.45; }
+.palette-ghost { position: fixed; z-index: 90; transform: translate(12px, 10px); padding: 6px 10px; border: 1px solid #333a45; border-radius: 8px; background: rgba(23, 26, 32, .96); color: #d8dde4; box-shadow: var(--shadow); font-size: 11px; font-weight: 600; pointer-events: none; }
+.palette-ghost.is-over { border-color: var(--accent); color: var(--accent-strong); }
+
+/* 자동완성 목록과 매개변수 툴팁 */
+.cm-tooltip { border: 1px solid #333a45 !important; border-radius: 9px !important; background: #171a20 !important; box-shadow: var(--shadow); overflow: hidden; }
+.cm-tooltip.cm-tooltip-autocomplete > ul { max-height: 220px; font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+.cm-tooltip.cm-tooltip-autocomplete > ul > li { padding: 4px 9px; }
+.cm-tooltip.cm-tooltip-autocomplete > ul > li[aria-selected] { background: var(--accent-soft); color: #eaf5f2; }
+.cm-completionDetail { margin-left: 8px; color: #6f7885; font-style: normal; }
+.jscad-doc { max-width: 320px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; }
+.jscad-doc code { color: var(--accent-strong); font: 11px/1.5 'JetBrains Mono', monospace; white-space: pre-wrap; }
+.jscad-doc p { margin: 0; color: #cbd2db; font-size: 11px; line-height: 1.55; }
+.jscad-doc ul { margin: 0; padding-left: 15px; display: flex; flex-direction: column; gap: 3px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.jscad-doc small { color: #5e6672; font: 9.5px 'JetBrains Mono', monospace; }
+.code-editor.is-drop-target .cm-cursor { display: block !important; border-left: 2px solid var(--accent); }
+
 .code-editor { height: 100%; min-height: 0; overflow: hidden; user-select: text; }
 .code-editor .cm-editor, .code-editor .cm-scroller { height: 100%; }
 .code-editor .cm-selectionBackground { background: rgba(82, 203, 181, .22) !important; }
