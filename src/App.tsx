@@ -4,6 +4,7 @@ import {
   Menu, MoreVertical, Play, Plus, Save, Search, Settings, Trash2, X,
 } from 'lucide-react'
 import { CodeEditor } from './components/CodeEditor'
+import { Licenses } from './components/Licenses'
 import { Modal } from './components/Modal'
 import { Toggle } from './components/Toggle'
 import { Viewer } from './components/Viewer'
@@ -13,6 +14,15 @@ import { TEMPLATE_LABELS } from './templates'
 import type { AppSettings, DialogState, Project, ProjectIndex, ProjectTemplate } from './types'
 
 interface ToastState { id: number; message: string; tone: 'success' | 'error' | 'info' }
+
+const DIALOG_TITLES: Record<NonNullable<DialogState>['kind'], string> = {
+  new: '새 프로젝트',
+  rename: '프로젝트 관리',
+  delete: '프로젝트 삭제',
+  settings: '설정',
+  shortcuts: '키보드 단축키',
+  licenses: '오픈소스 라이선스',
+}
 
 const formatTime = (iso: string) => new Intl.DateTimeFormat('ko-KR', {
   month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
@@ -337,7 +347,7 @@ export function App() {
 
       {dialog && (
         <Modal
-          title={dialog.kind === 'new' ? '새 프로젝트' : dialog.kind === 'rename' ? '프로젝트 관리' : dialog.kind === 'delete' ? '프로젝트 삭제' : dialog.kind === 'settings' ? '설정' : '키보드 단축키'}
+          title={DIALOG_TITLES[dialog.kind]}
           closing={dialogClosing}
           onClose={() => closeDialog()}
           footer={dialog.kind === 'new' ? <><button className="button ghost" onClick={() => closeDialog()}>취소</button><button className="button primary" disabled={!newName.trim()} onClick={() => closeDialog(() => void createProject())}>만들기</button></>
@@ -359,7 +369,9 @@ export function App() {
             <label className="font-setting"><span><strong>편집기 글자 크기</strong><small>물리 키보드 사용 시 가독성 조절</small></span><div><input type="range" min="12" max="22" value={settings.fontSize} onChange={(e) => updateSettings({ fontSize: Number(e.target.value) })} /><output>{settings.fontSize}px</output></div></label>
             <label className="font-setting"><span><strong>3D 회전 감도</strong><small>마우스와 한 손가락 드래그의 회전 속도</small></span><div><input type="range" min="0.1" max="1.2" step="0.05" value={settings.rotateSensitivity} onChange={(e) => updateSettings({ rotateSensitivity: Number(e.target.value) })} /><output>{Math.round(settings.rotateSensitivity * 100)}%</output></div></label>
             <label className="font-setting"><span><strong>확대·축소 감도</strong><small>휠과 두 손가락 핀치의 줌 속도</small></span><div><input type="range" min="0.15" max="1.2" step="0.05" value={settings.zoomSensitivity} onChange={(e) => updateSettings({ zoomSensitivity: Number(e.target.value) })} /><output>{Math.round(settings.zoomSensitivity * 100)}%</output></div></label>
+            <button className="settings-link" onClick={() => setDialog({ kind: 'licenses' })}><span><strong>오픈소스 라이선스</strong><small>이 앱이 포함한 소프트웨어의 저작권과 라이선스 원문</small></span><ChevronRight size={17} /></button>
           </div>}
+          {dialog.kind === 'licenses' && <Licenses />}
           {dialog.kind === 'shortcuts' && <div className="shortcut-grid">
             <span>실행</span><kbd>Ctrl Enter</kbd><span>저장</span><kbd>Ctrl S</kbd><span>새 프로젝트</span><kbd>Ctrl N</kbd><span>프로젝트 검색</span><kbd>Ctrl P</kbd><span>프로젝트 패널</span><kbd>Ctrl B</kbd><span>출력 패널</span><kbd>Ctrl J</kbd><span>설정</span><kbd>Ctrl ,</kbd><span>창 닫기</span><kbd>Esc</kbd>
           </div>}

@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "notices": "node scripts/generate-notices.mjs",
     "tauri": "tauri",
     "android:init": "tauri android init",
     "android:dev": "tauri android dev",

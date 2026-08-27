@@ -39,8 +39,47 @@ npm run android:init
 npm run android:build -- --target aarch64
 ```
 
+## 자동 빌드
+
+`main` 에 커밋하면 GitHub Actions 가 두 가지를 만듭니다.
+
+| 워크플로 | 결과물 |
+| --- | --- |
+| `.github/workflows/android.yml` | ARM64 설치 APK — 실행 페이지의 `jscad-studio-arm64-apk` 아티팩트 |
+| `.github/workflows/pages.yml` | 웹앱 — GitHub Pages 배포 |
+
+Pages 는 저장소 **Settings → Pages → Source** 를 `GitHub Actions` 로 한 번 바꿔 두어야 동작합니다.
+
+APK 는 기본적으로 그 실행에서만 쓰는 임시 키로 서명하므로 설치는 되지만 이전 빌드 위에 덮어쓸 수 없습니다. 고정 키로 서명하려면 키스토어를 한 번 만들어
+
+```bash
+keytool -genkeypair -keystore release.jks -alias jscad-studio \
+  -keyalg RSA -keysize 2048 -validity 10000
+base64 -w0 release.jks   # 출력값을 ANDROID_KEYSTORE_BASE64 시크릿에 넣는다
+```
+
+저장소 시크릿에 `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` 를 등록하면 됩니다.
+
 프로젝트는 Android 앱 전용 `AppLocalData/jscad-studio/projects` 아래에 저장됩니다. 외부 저장소 권한을 요구하지 않습니다.
 
 ## 웹 앱
 
-데스크톱 브라우저용 PWA는 [JSCAD Studio Web](https://jscad-studio-web.ye0l.chatgpt.site)에서 사용할 수 있습니다. 프로젝트는 해당 브라우저 프로필의 로컬 저장소에 보관되며, 첫 접속 후 설치하거나 오프라인으로 다시 열 수 있습니다.
+브라우저에서는 [JSCAD Studio Web](https://ye0l.github.io/jscad-studio/)으로 바로 쓸 수 있습니다. `main` 에 커밋하면 GitHub Actions 가 빌드해 GitHub Pages 로 배포합니다. 프로젝트는 해당 브라우저 프로필의 로컬 저장소(`localStorage`)에 보관되며, 앱 설치나 오프라인 캐시는 아직 지원하지 않습니다.
+
+## 라이선스
+
+이 저장소 자체의 라이선스는 아직 정하지 않았습니다.
+
+앱에는 오픈소스 소프트웨어가 포함되어 있으며, 저작권자와 라이선스 원문은 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) 에 그대로 실려 있습니다. 앱 안에서는 **설정 → 오픈소스 라이선스** 에서 같은 내용을 볼 수 있습니다. 주요 구성 요소는 다음과 같습니다.
+
+- [JSCAD](https://github.com/jscad/OpenJSCAD.org) (`@jscad/modeling`, `@jscad/regl-renderer`) — MIT, © 2017-2024 JSCAD Organization
+- [CodeMirror 6](https://github.com/codemirror) — MIT
+- [React](https://github.com/facebook/react) — MIT, © Meta Platforms, Inc.
+- [Tauri](https://github.com/tauri-apps/tauri) — MIT 또는 Apache-2.0
+- [regl](https://github.com/regl-project/regl) — MIT · [Lucide](https://github.com/lucide-icons/lucide) — ISC
+
+고지 파일은 실제 설치된 의존성에서 자동으로 만듭니다. 의존성을 바꾼 뒤에는 다시 생성해 주세요.
+
+```bash
+npm run notices
+```
