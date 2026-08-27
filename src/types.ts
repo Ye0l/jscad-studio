@@ -45,4 +45,5 @@ export type DialogState =
   | { kind: 'settings' }
   | { kind: 'shortcuts' }
   | { kind: 'licenses' }
+  | { kind: 'export' }
   | null

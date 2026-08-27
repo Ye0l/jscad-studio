@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
-  Box, Braces, ChevronRight, CircleHelp, Code2, Eye, FolderOpen, Grid3X3,
+  Box, Braces, ChevronRight, CircleHelp, Code2, Download, Eye, FolderOpen, Grid3X3,
   Menu, MoreVertical, Play, Plus, Save, Search, Settings, Trash2, X,
 } from 'lucide-react'
 import { CodeEditor, type CodeEditorHandle } from './components/CodeEditor'
@@ -10,6 +10,7 @@ import { PanelDivider, type ResizeAxis, type ResizePoint } from './components/Pa
 import { SnippetPalette, type DropPoint } from './components/SnippetPalette'
 import { Toggle } from './components/Toggle'
 import { Viewer } from './components/Viewer'
+import { EXPORT_FORMATS, exportGeometries, measureModel, type ExportFormat } from './exporter'
 import { runJscad } from './jscadRunner'
 import { DEFAULT_SETTINGS, storage } from './storage'
 import type { PaletteItem } from './jscadApi'
@@ -35,6 +36,7 @@ const DIALOG_TITLES: Record<NonNullable<DialogState>['kind'], string> = {
   settings: '설정',
   shortcuts: '키보드 단축키',
   licenses: '오픈소스 라이선스',
+  export: '내보내기',
 }
 
 const formatTime = (iso: string) => new Intl.DateTimeFormat('ko-KR', {
@@ -243,6 +245,14 @@ export function App() {
     toast('프로젝트를 삭제했습니다.', 'success')
   }, [index, project, toast])
 
+  const exportModel = useCallback((format: ExportFormat) => {
+    if (!project) return
+    // 브라우저 내려받기는 사용자 조작과 같은 흐름에서 시작해야 막히지 않는다
+    exportGeometries(project.name, format, geometries)
+      .then((target) => { if (target) toast(`${target} 로 내보냈습니다.`, 'success') })
+      .catch((error) => toast(`내보내기 실패: ${String(error)}`, 'error'))
+  }, [project, geometries, toast])
+
   const updateSettings = useCallback((changes: Partial<AppSettings>) => {
     if (!index) return
     const next = { ...index, settings: { ...index.settings, ...changes } }
@@ -265,6 +275,7 @@ export function App() {
       if (key === 'enter') { event.preventDefault(); void execute() }
       if (key === 'n') { event.preventDefault(); openNewDialog() }
       if (key === 'p') { event.preventDefault(); updateSettings({ sidebarOpen: true }); setTimeout(() => searchRef.current?.focus(), 80) }
+      if (key === 'e') { event.preventDefault(); setDialog({ kind: 'export' }) }
       if (key === ',') { event.preventDefault(); setDialog({ kind: 'settings' }) }
       if (key === 'b') { event.preventDefault(); updateSettings({ sidebarOpen: !settings?.sidebarOpen }) }
       if (key === 'j') { event.preventDefault(); updateSettings({ consoleOpen: !settings?.consoleOpen }) }
@@ -278,6 +289,8 @@ export function App() {
   if (!index || !project || !settings) {
     return <div className="boot-screen"><Box size={32} /><span>JSCAD Studio 여는 중…</span></div>
   }
+
+  const stats = dialog?.kind === 'export' ? measureModel(geometries) : null
 
   const layout: PanelLayout = panels ?? {
     sidebarWidth: settings.sidebarWidth,
@@ -368,6 +381,7 @@ export function App() {
         <div className="top-actions">
           <button className="button ghost" onClick={() => void saveNow()}><Save size={17} /><span>저장</span><kbd>Ctrl S</kbd></button>
           <button className="button primary" onClick={() => void execute()} disabled={runState === 'running'}><Play size={17} fill="currentColor" /><span>실행</span><kbd>Ctrl ↵</kbd></button>
+          <button className="icon-button" onClick={() => setDialog({ kind: 'export' })} aria-label="내보내기" title="STL·3MF 내보내기 (Ctrl E)"><Download size={19} /></button>
           <button className="icon-button" onClick={() => setDialog({ kind: 'settings' })} aria-label="설정"><Settings size={19} /></button>
         </div>
       </header>
@@ -506,9 +520,26 @@ export function App() {
             <label className="font-setting"><span><strong>확대·축소 감도</strong><small>휠과 두 손가락 핀치의 줌 속도</small></span><div><input type="range" min="0.15" max="1.2" step="0.05" value={settings.zoomSensitivity} onChange={(e) => updateSettings({ zoomSensitivity: Number(e.target.value) })} /><output>{Math.round(settings.zoomSensitivity * 100)}%</output></div></label>
             <button className="settings-link" onClick={() => setDialog({ kind: 'licenses' })}><span><strong>오픈소스 라이선스</strong><small>이 앱이 포함한 소프트웨어의 저작권과 라이선스 원문</small></span><ChevronRight size={17} /></button>
           </div>}
+          {dialog.kind === 'export' && <div className="export-view">
+            {stats ? (
+              <dl className="model-facts">
+                <div><dt>크기</dt><dd>{stats.size.map((value) => value.toFixed(1)).join(' × ')} mm</dd></div>
+                <div><dt>부피</dt><dd>{(stats.volume / 1000).toFixed(2)} cm³</dd></div>
+              </dl>
+            ) : (
+              <p className="muted-copy">내보낼 형상이 없습니다. 먼저 코드를 실행해 주세요.</p>
+            )}
+            {EXPORT_FORMATS.map((format) => (
+              <button key={format.id} className="export-option" disabled={!stats} onClick={() => { exportModel(format.id); closeDialog() }}>
+                <span><strong>{format.label}</strong><small>{format.note}</small></span>
+                <Download size={17} />
+              </button>
+            ))}
+            <p className="muted-copy">슬라이서에서 단위는 밀리미터로 열립니다.</p>
+          </div>}
           {dialog.kind === 'licenses' && <Licenses />}
           {dialog.kind === 'shortcuts' && <div className="shortcut-grid">
-            <span>실행</span><kbd>Ctrl Enter</kbd><span>저장</span><kbd>Ctrl S</kbd><span>새 프로젝트</span><kbd>Ctrl N</kbd><span>프로젝트 검색</span><kbd>Ctrl P</kbd><span>프로젝트 패널</span><kbd>Ctrl B</kbd><span>출력 패널</span><kbd>Ctrl J</kbd><span>설정</span><kbd>Ctrl ,</kbd><span>자동완성</span><kbd>Ctrl Space</kbd><span>창 닫기</span><kbd>Esc</kbd>
+            <span>실행</span><kbd>Ctrl Enter</kbd><span>저장</span><kbd>Ctrl S</kbd><span>새 프로젝트</span><kbd>Ctrl N</kbd><span>프로젝트 검색</span><kbd>Ctrl P</kbd><span>프로젝트 패널</span><kbd>Ctrl B</kbd><span>출력 패널</span><kbd>Ctrl J</kbd><span>내보내기</span><kbd>Ctrl E</kbd><span>설정</span><kbd>Ctrl ,</kbd><span>자동완성</span><kbd>Ctrl Space</kbd><span>창 닫기</span><kbd>Esc</kbd>
           </div>}
         </Modal>
       )}

@@ -123,6 +123,19 @@ kbd { padding: 2px 5px; border: 1px solid #353b46; border-bottom-color: #4b5360;
 .panel-divider--console::after { inset: -5px 0; }
 .app-shell:not(.console-open) .panel-divider--console { display: none; }
 
+/* 내보내기 화면 */
+.export-view { display: flex; flex-direction: column; gap: 10px; }
+.model-facts { margin: 0; display: flex; gap: 9px; }
+.model-facts > div { flex: 1; padding: 9px 11px; display: flex; flex-direction: column; gap: 4px; border: 1px solid #272c35; border-radius: 9px; background: #14171c; }
+.model-facts dt { color: var(--muted); font-size: 10px; }
+.model-facts dd { margin: 0; color: #e4e9ef; font: 13px 'JetBrains Mono', monospace; }
+.export-option { min-height: 60px; padding: 10px 12px; display: flex; align-items: center; gap: 12px; border: 1px solid #272c35; border-radius: 9px; background: #14171c; color: inherit; text-align: left; transition: border-color 150ms var(--ease), background 150ms var(--ease); }
+.export-option:not(:disabled):hover { border-color: var(--accent); background: #181d22; }
+.export-option > span { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.export-option strong { font-size: 12px; }
+.export-option small { color: var(--muted); font-size: 10px; line-height: 1.5; }
+.export-option svg { color: var(--accent); }
+
 /* 사이드바 탭과 도형 팔레트 */
 .sidebar-tabs { display: flex; gap: 2px; }
 .sidebar-tabs button { padding: 5px 9px; border: 0; border-radius: 7px; background: transparent; color: #79818e; font-size: 11px; font-weight: 700; letter-spacing: .04em; cursor: pointer; transition: color 150ms var(--ease), background 150ms var(--ease); }
