@@ -1,0 +1,127 @@
+name: Android APK 빌드
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Rust 툴체인
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add aarch64-linux-android
+
+      - name: Rust 빌드 캐시
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: cargo-android-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: cargo-android-
+
+      - name: Android NDK 확인
+        run: |
+          NDK="${ANDROID_NDK_ROOT:-${ANDROID_NDK_HOME:-}}"
+          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
+            NDK="$ANDROID_HOME/ndk/$(ls -1 "$ANDROID_HOME/ndk" | sort -V | tail -1)"
+          fi
+          if [ ! -d "$NDK" ]; then
+            echo "러너에 Android NDK 가 없습니다" >&2
+            exit 1
+          fi
+          echo "NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "사용할 NDK: $NDK"
+
+      - run: npm ci
+
+      # gen/android 는 저장소에 두지 않으므로 빌드마다 새로 생성한다
+      - name: Android 프로젝트 생성
+        run: npm run android:init -- --ci --skip-targets-install
+
+      - name: APK 빌드
+        run: npm run android:build -- --target aarch64
+
+      - name: 서명 키 준비
+        id: signing
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/signing.jks"
+            echo "kind=release" >> "$GITHUB_OUTPUT"
+          else
+            # 시크릿이 없으면 이번 실행에서만 쓰는 임시 키로 서명한다 (설치는 되지만 실행마다 서명이 달라진다)
+            keytool -genkeypair -keystore "$RUNNER_TEMP/signing.jks" -alias ci \
+              -keyalg RSA -keysize 2048 -validity 3650 \
+              -storepass ci-throwaway -keypass ci-throwaway \
+              -dname "CN=JSCAD Studio CI, O=JSCAD Studio, C=KR"
+            echo "kind=throwaway" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: APK 서명
+        env:
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD || 'ci-throwaway' }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS || 'ci' }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || 'ci-throwaway' }}
+        run: |
+          set -euo pipefail
+          TOOLS="$ANDROID_HOME/build-tools/$(ls -1 "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          UNSIGNED=$(find src-tauri/gen/android -name '*release-unsigned.apk' | head -1)
+          if [ -z "$UNSIGNED" ]; then
+            echo "빌드 결과에서 APK 를 찾지 못했습니다" >&2
+            find src-tauri/gen/android -name '*.apk' >&2 || true
+            exit 1
+          fi
+          "$TOOLS/zipalign" -p -f 4 "$UNSIGNED" "$RUNNER_TEMP/aligned.apk"
+          "$TOOLS/apksigner" sign \
+            --ks "$RUNNER_TEMP/signing.jks" --ks-pass "pass:$STORE_PASSWORD" \
+            --ks-key-alias "$KEY_ALIAS" --key-pass "pass:$KEY_PASSWORD" \
+            --out jscad-studio-arm64.apk "$RUNNER_TEMP/aligned.apk"
+          "$TOOLS/apksigner" verify --print-certs jscad-studio-arm64.apk
+
+      - name: 요약
+        run: |
+          {
+            echo "### APK 빌드 완료"
+            echo ""
+            echo "- 대상: \`aarch64\` (ARM64 태블릿·휴대폰)"
+            echo "- 크기: $(du -h jscad-studio-arm64.apk | cut -f1)"
+            if [ "${{ steps.signing.outputs.kind }}" = "throwaway" ]; then
+              echo "- 서명: **임시 키** — 설치는 되지만 실행마다 서명이 달라 덮어쓰기 설치가 안 됩니다."
+              echo "  \`ANDROID_KEYSTORE_BASE64\`, \`ANDROID_KEYSTORE_PASSWORD\`, \`ANDROID_KEY_ALIAS\`, \`ANDROID_KEY_PASSWORD\` 시크릿을 등록하면 고정 키로 서명합니다."
+            else
+              echo "- 서명: 저장소 시크릿의 릴리스 키"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jscad-studio-arm64-apk
+          path: jscad-studio-arm64.apk
+          if-no-files-found: error

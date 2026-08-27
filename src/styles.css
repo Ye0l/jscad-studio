@@ -171,6 +171,19 @@ kbd { padding: 2px 5px; border: 1px solid #353b46; border-bottom-color: #4b5360;
 .font-setting > div { display: flex; align-items: center; gap: 10px; }
 .font-setting input { accent-color: var(--accent); }
 .font-setting output { width: 44px; text-align: right; color: #c8ced6; font: 11px 'JetBrains Mono', monospace; }
+.settings-link { min-height: 66px; width: 100%; padding: 0; display: flex; align-items: center; gap: 12px; border: 0; border-top: 1px solid #272c35; background: none; color: inherit; text-align: left; cursor: pointer; }
+.settings-link > span:first-child { flex: 1; display: flex; flex-direction: column; gap: 5px; }
+.settings-link strong { font-size: 12px; }
+.settings-link small { color: var(--muted); font-size: 10px; font-weight: 400; }
+.settings-link svg { color: var(--muted); }
+.settings-link:hover svg { color: #c8ced6; }
+
+.license-view { display: flex; flex-direction: column; gap: 12px; }
+.license-highlights { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.license-highlights li { display: flex; flex-direction: column; gap: 3px; padding: 9px 11px; border: 1px solid #272c35; border-radius: 9px; background: #14171c; }
+.license-highlights strong { font-size: 11px; }
+.license-highlights span { color: var(--muted); font-size: 10px; }
+.license-text { margin: 0; padding: 11px 12px; max-height: 46vh; overflow: auto; border: 1px solid #272c35; border-radius: 9px; background: #0e1014; color: #94a0ae; font: 10px/1.55 'JetBrains Mono', monospace; white-space: pre-wrap; word-break: break-word; user-select: text; }
 .shortcut-grid { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 9px 18px; color: #b7bec8; font-size: 11px; }
 .shortcut-grid kbd { padding: 5px 8px; text-align: center; color: #d9dee5; }
 

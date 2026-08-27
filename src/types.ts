@@ -41,4 +41,5 @@ export type DialogState =
   | { kind: 'delete'; project: Project }
   | { kind: 'settings' }
   | { kind: 'shortcuts' }
+  | { kind: 'licenses' }
   | null
