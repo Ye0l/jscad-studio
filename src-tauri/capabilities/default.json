@@ -1,0 +1,10 @@
+{
+  "identifier": "main-capability",
+  "description": "JSCAD Studio main window and app-local project storage",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "fs:default",
+    "fs:allow-applocaldata-write-recursive"
+  ]
+}

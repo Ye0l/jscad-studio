@@ -1,0 +1,26 @@
+[package]
+name = "jscad-studio"
+version = "0.1.1"
+description = "Tablet-first JSCAD editor and viewer"
+authors = ["Yeol"]
+edition = "2021"
+
+[lib]
+name = "jscad_studio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tauri-plugin-fs = "2"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
