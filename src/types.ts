@@ -21,6 +21,9 @@ export interface AppSettings {
   zoomSensitivity: number
   sidebarOpen: boolean
   consoleOpen: boolean
+  sidebarWidth: number
+  splitRatio: number
+  consoleHeight: number
 }
 
 export interface ProjectIndex {

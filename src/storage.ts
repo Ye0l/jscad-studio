@@ -17,6 +17,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   zoomSensitivity: 0.35,
   sidebarOpen: true,
   consoleOpen: false,
+  sidebarWidth: 248,
+  splitRatio: 0.45,
+  consoleHeight: 150,
 }
 
 const isTauri = () => '__TAURI_INTERNALS__' in window
