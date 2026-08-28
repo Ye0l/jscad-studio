@@ -1,5 +1,6 @@
 import { BaseDirectory, exists, mkdir, readTextFile, remove, writeTextFile } from '@tauri-apps/plugin-fs'
 import { TEMPLATES } from './templates'
+import { isTauri } from './platform'
 import type { AppSettings, Project, ProjectIndex, ProjectMeta, ProjectTemplate } from './types'
 
 const ROOT = 'jscad-studio'
@@ -17,9 +18,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   zoomSensitivity: 0.35,
   sidebarOpen: true,
   consoleOpen: false,
+  sidebarWidth: 248,
+  splitRatio: 0.45,
+  consoleHeight: 150,
 }
-
-const isTauri = () => '__TAURI_INTERNALS__' in window
 
 const browserLoad = (): { index: ProjectIndex; files: Record<string, string> } | null => {
   const raw = localStorage.getItem(BROWSER_KEY)

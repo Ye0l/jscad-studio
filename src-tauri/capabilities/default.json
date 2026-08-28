@@ -1,10 +1,12 @@
 {
   "identifier": "main-capability",
-  "description": "JSCAD Studio main window and app-local project storage",
+  "description": "JSCAD Studio main window, app-local project storage, and saving exports to a file the user picks",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "fs:default",
-    "fs:allow-applocaldata-write-recursive"
+    "fs:allow-applocaldata-write-recursive",
+    "dialog:default",
+    "fs:allow-write-file"
   ]
 }

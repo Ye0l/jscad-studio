@@ -21,6 +21,9 @@ export interface AppSettings {
   zoomSensitivity: number
   sidebarOpen: boolean
   consoleOpen: boolean
+  sidebarWidth: number
+  splitRatio: number
+  consoleHeight: number
 }
 
 export interface ProjectIndex {
@@ -42,4 +45,5 @@ export type DialogState =
   | { kind: 'settings' }
   | { kind: 'shortcuts' }
   | { kind: 'licenses' }
+  | { kind: 'export' }
   | null

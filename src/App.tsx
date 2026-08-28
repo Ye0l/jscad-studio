@@ -1,19 +1,33 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
-  Box, Braces, ChevronRight, CircleHelp, Code2, Eye, FolderOpen, Grid3X3,
+  Box, Braces, ChevronRight, CircleHelp, Code2, Download, Eye, FolderOpen, Grid3X3,
   Menu, MoreVertical, Play, Plus, Save, Search, Settings, Trash2, X,
 } from 'lucide-react'
-import { CodeEditor } from './components/CodeEditor'
+import { CodeEditor, type CodeEditorHandle } from './components/CodeEditor'
 import { Licenses } from './components/Licenses'
 import { Modal } from './components/Modal'
+import { PanelDivider, type ResizeAxis, type ResizePoint } from './components/PanelDivider'
+import { SnippetPalette, type DropPoint } from './components/SnippetPalette'
 import { Toggle } from './components/Toggle'
 import { Viewer } from './components/Viewer'
+import { EXPORT_FORMATS, exportGeometries, measureModel, type ExportFormat } from './exporter'
 import { runJscad } from './jscadRunner'
-import { storage } from './storage'
+import { DEFAULT_SETTINGS, storage } from './storage'
+import type { PaletteItem } from './jscadApi'
 import { TEMPLATE_LABELS } from './templates'
 import type { AppSettings, DialogState, Project, ProjectIndex, ProjectTemplate } from './types'
 
 interface ToastState { id: number; message: string; tone: 'success' | 'error' | 'info' }
+
+// 손잡이를 끌 때 각 패널이 최소한 유지하는 크기(px)
+const MIN_PANE = 180
+const MIN_SIDEBAR = 170
+const MAX_SIDEBAR = 420
+const MIN_CONSOLE = 90
+
+interface PanelLayout { sidebarWidth: number; splitRatio: number; consoleHeight: number }
+
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 
 const DIALOG_TITLES: Record<NonNullable<DialogState>['kind'], string> = {
   new: '새 프로젝트',
@@ -22,6 +36,7 @@ const DIALOG_TITLES: Record<NonNullable<DialogState>['kind'], string> = {
   settings: '설정',
   shortcuts: '키보드 단축키',
   licenses: '오픈소스 라이선스',
+  export: '내보내기',
 }
 
 const formatTime = (iso: string) => new Intl.DateTimeFormat('ko-KR', {
@@ -45,6 +60,16 @@ export function App() {
   const [toasts, setToasts] = useState<ToastState[]>([])
   const searchRef = useRef<HTMLInputElement>(null)
   const saveTimerRef = useRef<number | null>(null)
+  const workspaceRef = useRef<HTMLElement>(null)
+  const editorRef = useRef<HTMLElement>(null)
+  const previewRef = useRef<HTMLElement>(null)
+  const consoleRef = useRef<HTMLElement>(null)
+  // 끄는 동안에는 로컬 상태로만 반영하고, 손을 뗄 때 한 번만 설정에 저장한다
+  const [panels, setPanels] = useState<PanelLayout | null>(null)
+  const panelsRef = useRef<PanelLayout | null>(null)
+  const [resizeAxis, setResizeAxis] = useState<ResizeAxis | null>(null)
+  const [sidebarTab, setSidebarTab] = useState<'projects' | 'shapes'>('projects')
+  const editorApiRef = useRef<CodeEditorHandle | null>(null)
 
   const settings = index?.settings
   const motion = settings?.motion ?? true
@@ -220,6 +245,14 @@ export function App() {
     toast('프로젝트를 삭제했습니다.', 'success')
   }, [index, project, toast])
 
+  const exportModel = useCallback((format: ExportFormat) => {
+    if (!project) return
+    // 브라우저 내려받기는 사용자 조작과 같은 흐름에서 시작해야 막히지 않는다
+    exportGeometries(project.name, format, geometries)
+      .then((target) => { if (target) toast(`${target} 로 내보냈습니다.`, 'success') })
+      .catch((error) => toast(`내보내기 실패: ${String(error)}`, 'error'))
+  }, [project, geometries, toast])
+
   const updateSettings = useCallback((changes: Partial<AppSettings>) => {
     if (!index) return
     const next = { ...index, settings: { ...index.settings, ...changes } }
@@ -242,6 +275,7 @@ export function App() {
       if (key === 'enter') { event.preventDefault(); void execute() }
       if (key === 'n') { event.preventDefault(); openNewDialog() }
       if (key === 'p') { event.preventDefault(); updateSettings({ sidebarOpen: true }); setTimeout(() => searchRef.current?.focus(), 80) }
+      if (key === 'e') { event.preventDefault(); setDialog({ kind: 'export' }) }
       if (key === ',') { event.preventDefault(); setDialog({ kind: 'settings' }) }
       if (key === 'b') { event.preventDefault(); updateSettings({ sidebarOpen: !settings?.sidebarOpen }) }
       if (key === 'j') { event.preventDefault(); updateSettings({ consoleOpen: !settings?.consoleOpen }) }
@@ -256,14 +290,83 @@ export function App() {
     return <div className="boot-screen"><Box size={32} /><span>JSCAD Studio 여는 중…</span></div>
   }
 
+  const stats = dialog?.kind === 'export' ? measureModel(geometries) : null
+
+  const layout: PanelLayout = panels ?? {
+    sidebarWidth: settings.sidebarWidth,
+    splitRatio: settings.splitRatio,
+    consoleHeight: settings.consoleHeight,
+  }
+  panelsRef.current = layout
+
+  const applyLayout = (changes: Partial<PanelLayout>, persist = false) => {
+    const next = { ...layout, ...changes }
+    panelsRef.current = next
+    setPanels(next)
+    if (persist) updateSettings(next)
+  }
+
+  const endResize = () => {
+    setResizeAxis(null)
+    if (panelsRef.current) updateSettings(panelsRef.current)
+  }
+
+  const resizeSidebar = (point: ResizePoint, rect: DOMRect) => {
+    const area = workspaceRef.current?.getBoundingClientRect()
+    if (!area) return
+    const max = Math.min(MAX_SIDEBAR, Math.max(MIN_SIDEBAR, area.width - MIN_PANE * 2))
+    applyLayout({ sidebarWidth: clamp(point.x - area.left - rect.width / 2, MIN_SIDEBAR, max) })
+  }
+
+  // 손잡이가 가로로 길면 편집기와 미리보기가 위아래로 놓인 상태다
+  const resizeSplit = (point: ResizePoint, rect: DOMRect) => {
+    const editor = editorRef.current?.getBoundingClientRect()
+    const preview = previewRef.current?.getBoundingClientRect()
+    if (!editor || !preview) return
+    const stacked = rect.width > rect.height
+    const start = stacked ? editor.top : editor.left
+    const total = (stacked ? preview.bottom : preview.right) - start
+    if (total <= MIN_PANE * 2) return
+    const offset = (stacked ? point.y : point.x) - start - (stacked ? rect.height : rect.width) / 2
+    applyLayout({ splitRatio: clamp(offset / total, MIN_PANE / total, 1 - MIN_PANE / total) })
+  }
+
+  const overEditor = (point: DropPoint | null) => {
+    if (!point) {
+      editorApiRef.current?.showDropTarget(null)
+      return false
+    }
+    const rect = editorRef.current?.getBoundingClientRect()
+    const inside = !!rect && point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom
+    editorApiRef.current?.showDropTarget(inside ? point : null)
+    return inside
+  }
+
+  const insertSnippet = (item: PaletteItem, point?: DropPoint) => {
+    editorApiRef.current?.insertSnippet({ code: item.code, requires: item.requires }, point)
+    editorApiRef.current?.showDropTarget(null)
+  }
+
+  const resizeConsole = (point: ResizePoint, rect: DOMRect) => {
+    const area = workspaceRef.current?.getBoundingClientRect()
+    const panel = consoleRef.current?.getBoundingClientRect()
+    if (!area || !panel) return
+    const max = Math.max(MIN_CONSOLE, area.height + panel.height - MIN_PANE)
+    applyLayout({ consoleHeight: clamp(panel.bottom - point.y - rect.height / 2, MIN_CONSOLE, max) })
+  }
+
   return (
     <div
-      className={`app-shell${settings.sidebarOpen ? '' : ' sidebar-closed'}${settings.consoleOpen ? ' console-open' : ''}`}
+      className={`app-shell${settings.sidebarOpen ? '' : ' sidebar-closed'}${settings.consoleOpen ? ' console-open' : ''}${resizeAxis ? ' is-resizing' : ''}`}
+      data-resize-axis={resizeAxis ?? undefined}
       style={{
         width: `${100 / settings.uiScale}%`,
         height: `${100 / settings.uiScale}%`,
         transform: `scale(${settings.uiScale})`,
         transformOrigin: 'top left',
+        '--sidebar-w': `${layout.sidebarWidth}px`,
+        '--split': layout.splitRatio,
+        '--console-h': `${layout.consoleHeight}px`,
       } as CSSProperties}
     >
       <header className="topbar">
@@ -278,27 +381,54 @@ export function App() {
         <div className="top-actions">
           <button className="button ghost" onClick={() => void saveNow()}><Save size={17} /><span>저장</span><kbd>Ctrl S</kbd></button>
           <button className="button primary" onClick={() => void execute()} disabled={runState === 'running'}><Play size={17} fill="currentColor" /><span>실행</span><kbd>Ctrl ↵</kbd></button>
+          <button className="icon-button" onClick={() => setDialog({ kind: 'export' })} aria-label="내보내기" title="STL·3MF 내보내기 (Ctrl E)"><Download size={19} /></button>
           <button className="icon-button" onClick={() => setDialog({ kind: 'settings' })} aria-label="설정"><Settings size={19} /></button>
         </div>
       </header>
 
-      <main className="workspace">
+      <main className="workspace" ref={workspaceRef}>
         <aside className="sidebar">
-          <div className="panel-heading"><span>프로젝트</span><button className="icon-button tiny" onClick={openNewDialog} aria-label="새 프로젝트"><Plus size={17} /></button></div>
-          <label className="search-box"><Search size={15} /><input ref={searchRef} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="프로젝트 검색" /><kbd>Ctrl P</kbd></label>
-          <nav className="project-list">
-            {filteredProjects.map((item) => (
-              <button key={item.id} className={`project-item${item.id === project.id ? ' active' : ''}`} onClick={() => void switchProject(item.id)}>
-                <span className="project-icon"><Code2 size={17} /></span>
-                <span className="project-copy"><strong>{item.name}</strong><small>{formatTime(item.updatedAt)}</small></span>
-                {item.id === project.id && <span className="active-pip" />}
-              </button>
-            ))}
-          </nav>
-          <button className="new-project-button" onClick={openNewDialog}><Plus size={17} />새 프로젝트 <kbd>Ctrl N</kbd></button>
+          <div className="panel-heading">
+            <div className="sidebar-tabs" role="tablist">
+              <button role="tab" aria-selected={sidebarTab === 'projects'} className={sidebarTab === 'projects' ? 'selected' : ''} onClick={() => setSidebarTab('projects')}>프로젝트</button>
+              <button role="tab" aria-selected={sidebarTab === 'shapes'} className={sidebarTab === 'shapes' ? 'selected' : ''} onClick={() => setSidebarTab('shapes')}>도형</button>
+            </div>
+            {sidebarTab === 'projects' && <button className="icon-button tiny" onClick={openNewDialog} aria-label="새 프로젝트"><Plus size={17} /></button>}
+          </div>
+          {sidebarTab === 'projects' ? (
+            <>
+              <label className="search-box"><Search size={15} /><input ref={searchRef} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="프로젝트 검색" /><kbd>Ctrl P</kbd></label>
+              <nav className="project-list">
+                {filteredProjects.map((item) => (
+                  <button key={item.id} className={`project-item${item.id === project.id ? ' active' : ''}`} onClick={() => void switchProject(item.id)}>
+                    <span className="project-icon"><Code2 size={17} /></span>
+                    <span className="project-copy"><strong>{item.name}</strong><small>{formatTime(item.updatedAt)}</small></span>
+                    {item.id === project.id && <span className="active-pip" />}
+                  </button>
+                ))}
+              </nav>
+              <button className="new-project-button" onClick={openNewDialog}><Plus size={17} />새 프로젝트 <kbd>Ctrl N</kbd></button>
+            </>
+          ) : (
+            <SnippetPalette
+              onInsert={(item) => insertSnippet(item)}
+              onDrop={(item, point) => insertSnippet(item, point)}
+              onDragOver={overEditor}
+            />
+          )}
         </aside>
 
-        <section className="editor-panel">
+        <PanelDivider
+          className="panel-divider--sidebar"
+          label="프로젝트 패널 너비 조절"
+          onResize={resizeSidebar}
+          onNudge={(direction) => applyLayout({ sidebarWidth: clamp(layout.sidebarWidth + direction * 16, MIN_SIDEBAR, MAX_SIDEBAR) }, true)}
+          onReset={() => applyLayout({ sidebarWidth: DEFAULT_SETTINGS.sidebarWidth }, true)}
+          onActive={(axis) => (axis ? setResizeAxis(axis) : endResize())}
+        />
+
+
+        <section className="editor-panel" ref={editorRef}>
           <div className="panel-heading tab-heading">
             <span><Code2 size={15} />main.jscad</span>
             <div>
@@ -308,11 +438,21 @@ export function App() {
           <CodeEditor
             value={project.code}
             fontSize={settings.fontSize}
+            apiRef={editorApiRef}
             onChange={(code) => { setProject((current) => current ? { ...current, code } : current); setDirty(true) }}
           />
         </section>
 
-        <section className="preview-panel">
+        <PanelDivider
+          className="panel-divider--split"
+          label="편집기와 미리보기 크기 조절"
+          onResize={resizeSplit}
+          onNudge={(direction) => applyLayout({ splitRatio: clamp(layout.splitRatio + direction * 0.02, 0.1, 0.9) }, true)}
+          onReset={() => applyLayout({ splitRatio: DEFAULT_SETTINGS.splitRatio }, true)}
+          onActive={(axis) => (axis ? setResizeAxis(axis) : endResize())}
+        />
+
+        <section className="preview-panel" ref={previewRef}>
           <div className="panel-heading preview-heading">
             <span><Eye size={15} />3D 미리보기</span>
             <div className="preview-actions">
@@ -332,7 +472,16 @@ export function App() {
         </section>
       </main>
 
-      <section className="console-panel" aria-hidden={!settings.consoleOpen}>
+      <PanelDivider
+        className="panel-divider--console"
+        label="출력 패널 높이 조절"
+        onResize={resizeConsole}
+        onNudge={(direction) => applyLayout({ consoleHeight: clamp(layout.consoleHeight - direction * 16, MIN_CONSOLE, 480) }, true)}
+        onReset={() => applyLayout({ consoleHeight: DEFAULT_SETTINGS.consoleHeight }, true)}
+        onActive={(axis) => (axis ? setResizeAxis(axis) : endResize())}
+      />
+
+      <section className="console-panel" ref={consoleRef} aria-hidden={!settings.consoleOpen}>
         <div className="console-heading"><span>출력</span><button className="icon-button tiny" onClick={() => updateSettings({ consoleOpen: false })}><X size={16} /></button></div>
         <pre className={runState === 'error' ? 'error-text' : ''}>{runMessage}</pre>
       </section>
@@ -371,9 +520,26 @@ export function App() {
             <label className="font-setting"><span><strong>확대·축소 감도</strong><small>휠과 두 손가락 핀치의 줌 속도</small></span><div><input type="range" min="0.15" max="1.2" step="0.05" value={settings.zoomSensitivity} onChange={(e) => updateSettings({ zoomSensitivity: Number(e.target.value) })} /><output>{Math.round(settings.zoomSensitivity * 100)}%</output></div></label>
             <button className="settings-link" onClick={() => setDialog({ kind: 'licenses' })}><span><strong>오픈소스 라이선스</strong><small>이 앱이 포함한 소프트웨어의 저작권과 라이선스 원문</small></span><ChevronRight size={17} /></button>
           </div>}
+          {dialog.kind === 'export' && <div className="export-view">
+            {stats ? (
+              <dl className="model-facts">
+                <div><dt>크기</dt><dd>{stats.size.map((value) => value.toFixed(1)).join(' × ')} mm</dd></div>
+                <div><dt>부피</dt><dd>{(stats.volume / 1000).toFixed(2)} cm³</dd></div>
+              </dl>
+            ) : (
+              <p className="muted-copy">내보낼 형상이 없습니다. 먼저 코드를 실행해 주세요.</p>
+            )}
+            {EXPORT_FORMATS.map((format) => (
+              <button key={format.id} className="export-option" disabled={!stats} onClick={() => { exportModel(format.id); closeDialog() }}>
+                <span><strong>{format.label}</strong><small>{format.note}</small></span>
+                <Download size={17} />
+              </button>
+            ))}
+            <p className="muted-copy">슬라이서에서 단위는 밀리미터로 열립니다.</p>
+          </div>}
           {dialog.kind === 'licenses' && <Licenses />}
           {dialog.kind === 'shortcuts' && <div className="shortcut-grid">
-            <span>실행</span><kbd>Ctrl Enter</kbd><span>저장</span><kbd>Ctrl S</kbd><span>새 프로젝트</span><kbd>Ctrl N</kbd><span>프로젝트 검색</span><kbd>Ctrl P</kbd><span>프로젝트 패널</span><kbd>Ctrl B</kbd><span>출력 패널</span><kbd>Ctrl J</kbd><span>설정</span><kbd>Ctrl ,</kbd><span>창 닫기</span><kbd>Esc</kbd>
+            <span>실행</span><kbd>Ctrl Enter</kbd><span>저장</span><kbd>Ctrl S</kbd><span>새 프로젝트</span><kbd>Ctrl N</kbd><span>프로젝트 검색</span><kbd>Ctrl P</kbd><span>프로젝트 패널</span><kbd>Ctrl B</kbd><span>출력 패널</span><kbd>Ctrl J</kbd><span>내보내기</span><kbd>Ctrl E</kbd><span>설정</span><kbd>Ctrl ,</kbd><span>자동완성</span><kbd>Ctrl Space</kbd><span>창 닫기</span><kbd>Esc</kbd>
           </div>}
         </Modal>
       )}
