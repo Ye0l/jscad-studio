@@ -16,11 +16,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   uiScale: 1,
   rotateSensitivity: 0.3,
   zoomSensitivity: 0.35,
-  sidebarOpen: true,
-  consoleOpen: false,
-  sidebarWidth: 248,
-  splitRatio: 0.45,
-  consoleHeight: 150,
+  dock: null,
 }
 
 const browserLoad = (): { index: ProjectIndex; files: Record<string, string> } | null => {
