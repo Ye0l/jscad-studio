@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
-  Box, Braces, ChevronRight, Code2, Download, Eye, FolderOpen, Grid3X3, LayoutGrid,
+  Box, Braces, ChevronRight, Cloud, Code2, Download, Eye, FolderOpen, Grid3X3, LayoutGrid,
   Play, Plus, Save, Settings, Terminal, Trash2, X,
 } from 'lucide-react'
 import { CodeEditor, type CodeEditorHandle } from './components/CodeEditor'
 import { ContextMenu, type MenuItem } from './components/ContextMenu'
 import { DockView, type TabInfo } from './components/DockView'
+import { GitPanel } from './components/GitPanel'
 import { Licenses } from './components/Licenses'
 import { Modal } from './components/Modal'
 import { ProjectList } from './components/ProjectList'
@@ -18,6 +19,7 @@ import {
 } from './dock/layout'
 import type { DockNode, TabId, ViewKind } from './dock/types'
 import { EXPORT_FORMATS, exportGeometries, measureModel, type ExportFormat } from './exporter'
+import type { GitSettings } from './git'
 import { runJscad } from './jscadRunner'
 import { storage } from './storage'
 import type { PaletteItem } from './jscadApi'
@@ -45,6 +47,7 @@ const DIALOG_TITLES: Record<NonNullable<DialogState>['kind'], string> = {
   shortcuts: '키보드 단축키',
   licenses: '오픈소스 라이선스',
   export: '내보내기',
+  git: 'GitHub 연동',
 }
 
 const VIEW_LABELS: Record<Exclude<ViewKind, 'editor' | 'preview'>, string> = {
@@ -71,10 +74,14 @@ export function App() {
   const saveTimerRef = useRef<number | null>(null)
   const loadingRef = useRef(new Set<string>())
   const editorApis = useRef(new Map<string, { current: CodeEditorHandle | null }>())
+  const indexRef = useRef<ProjectIndex | null>(null)
+  const docsRef = useRef<Record<string, OpenDoc>>({})
 
   const settings = index?.settings
   const motion = settings?.motion ?? true
   const doc = focusedId ? docs[focusedId] ?? null : null
+  indexRef.current = index
+  docsRef.current = docs
 
   const toast = useCallback((message: string, tone: ToastState['tone'] = 'info') => {
     const id = Date.now() + Math.random()
@@ -317,6 +324,43 @@ export function App() {
     toast('프로젝트를 삭제했습니다.', 'success')
   }, [index, dock, focusedId, applyDock, toast])
 
+  // 연동 창은 오래 열려 있으므로 최신 상태를 ref 로 읽는다 (닫힌 채로 굳은 목록을 올리지 않도록)
+  const loadAllProjects = useCallback(async () => {
+    const current = indexRef.current
+    if (!current) return []
+    const list: Project[] = []
+    for (const meta of current.projects) {
+      list.push(docsRef.current[meta.id]?.project ?? await storage.loadProject(meta))
+    }
+    return list
+  }, [])
+
+  /** 저장소에서 받아온 내용을 로컬 프로젝트로 반영한다 */
+  const applyPulled = useCallback(async (files: { id: string; name: string; code: string }[]) => {
+    let nextIndex = indexRef.current
+    if (!nextIndex) return
+    for (const file of files) {
+      const now = new Date().toISOString()
+      const existing = nextIndex.projects.find((item) => item.id === file.id)
+      const project: Project = {
+        id: file.id,
+        name: file.name,
+        code: file.code,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      }
+      const { saved, nextIndex: updated } = buildSavedState(project, nextIndex)
+      await storage.saveProject(saved, updated)
+      nextIndex = updated
+      setDocs((current) => (current[file.id]
+        ? { ...current, [file.id]: { ...current[file.id], project: saved, dirty: false } }
+        : current))
+      if (docsRef.current[file.id]) void execute(file.id, file.code)
+    }
+    setIndex(nextIndex)
+    indexRef.current = nextIndex
+  }, [buildSavedState, execute])
+
   const exportModel = useCallback((format: ExportFormat) => {
     if (!doc) return
     // 브라우저 내려받기는 사용자 조작과 같은 흐름에서 시작해야 막히지 않는다
@@ -531,6 +575,7 @@ export function App() {
           <button className="button ghost" onClick={() => void saveDocs(focusedId ? [focusedId] : [], true)} disabled={!doc}><Save size={17} /><span>저장</span><kbd>Ctrl S</kbd></button>
           <button className="button primary" onClick={() => focusedId && void execute(focusedId)} disabled={!doc || runState === 'running'}><Play size={17} fill="currentColor" /><span>실행</span><kbd>Ctrl ↵</kbd></button>
           <button className="icon-button" onClick={() => setDialog({ kind: 'export' })} aria-label="내보내기" title="STL·3MF 내보내기 (Ctrl E)"><Download size={19} /></button>
+          <button className={`icon-button${settings.git ? ' selected' : ''}`} onClick={() => setDialog({ kind: 'git' })} aria-label="GitHub 연동" title={settings.git ? `${settings.git.repo} 와 동기화` : 'GitHub 연동'}><Cloud size={19} /></button>
           <button className="icon-button" onClick={() => setDialog({ kind: 'settings' })} aria-label="설정"><Settings size={19} /></button>
         </div>
       </header>
@@ -598,6 +643,7 @@ export function App() {
             <label className="font-setting"><span><strong>편집기 글자 크기</strong><small>물리 키보드 사용 시 가독성 조절</small></span><div><input type="range" min="12" max="22" value={settings.fontSize} onChange={(e) => updateSettings({ fontSize: Number(e.target.value) })} /><output>{settings.fontSize}px</output></div></label>
             <label className="font-setting"><span><strong>3D 회전 감도</strong><small>마우스와 한 손가락 드래그의 회전 속도</small></span><div><input type="range" min="0.1" max="1.2" step="0.05" value={settings.rotateSensitivity} onChange={(e) => updateSettings({ rotateSensitivity: Number(e.target.value) })} /><output>{Math.round(settings.rotateSensitivity * 100)}%</output></div></label>
             <label className="font-setting"><span><strong>확대·축소 감도</strong><small>휠과 두 손가락 핀치의 줌 속도</small></span><div><input type="range" min="0.15" max="1.2" step="0.05" value={settings.zoomSensitivity} onChange={(e) => updateSettings({ zoomSensitivity: Number(e.target.value) })} /><output>{Math.round(settings.zoomSensitivity * 100)}%</output></div></label>
+            <button className="settings-link" onClick={() => setDialog({ kind: 'git' })}><span><strong>GitHub 연동</strong><small>{settings.git ? `${settings.git.repo} · ${settings.git.branch}` : '저장소 한 곳에 프로젝트를 보관하고 다른 기기와 이어 쓰기'}</small></span><ChevronRight size={17} /></button>
             <button className="settings-link" onClick={() => { applyDock(defaultLayout(focusedId ?? index.projects[0].id), true); toast('레이아웃을 기본값으로 되돌렸습니다.', 'success') }}><span><strong>레이아웃 초기화</strong><small>패널 배치와 크기를 처음 상태로</small></span><ChevronRight size={17} /></button>
             <button className="settings-link" onClick={() => setDialog({ kind: 'licenses' })}><span><strong>오픈소스 라이선스</strong><small>이 앱이 포함한 소프트웨어의 저작권과 라이선스 원문</small></span><ChevronRight size={17} /></button>
           </div>}
@@ -618,6 +664,15 @@ export function App() {
             ))}
             <p className="muted-copy">슬라이서에서 단위는 밀리미터로 열립니다.</p>
           </div>}
+          {dialog.kind === 'git' && (
+            <GitPanel
+              settings={settings.git}
+              loadProjects={loadAllProjects}
+              onSaveSettings={(next: GitSettings | null) => updateSettings({ git: next })}
+              onPulled={applyPulled}
+              toast={toast}
+            />
+          )}
           {dialog.kind === 'licenses' && <Licenses />}
           {dialog.kind === 'shortcuts' && <div className="shortcut-grid">
             <span>실행</span><kbd>Ctrl Enter</kbd><span>저장</span><kbd>Ctrl S</kbd><span>새 프로젝트</span><kbd>Ctrl N</kbd><span>프로젝트 검색</span><kbd>Ctrl P</kbd><span>프로젝트 패널</span><kbd>Ctrl B</kbd><span>출력 패널</span><kbd>Ctrl J</kbd><span>내보내기</span><kbd>Ctrl E</kbd><span>설정</span><kbd>Ctrl ,</kbd><span>자동완성</span><kbd>Ctrl Space</kbd><span>창 닫기</span><kbd>Esc</kbd>

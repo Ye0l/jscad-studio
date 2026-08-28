@@ -1,4 +1,5 @@
 import type { DockNode } from './dock/types'
+import type { GitSettings } from './git'
 
 export type ProjectTemplate = 'blank' | 'keycap' | 'plate'
 
@@ -23,6 +24,8 @@ export interface AppSettings {
   zoomSensitivity: number
   /** 도크 레이아웃. 처음 실행이거나 저장본이 깨졌으면 null */
   dock: DockNode | null
+  /** GitHub 연동 설정. 연결 전에는 null */
+  git: GitSettings | null
 }
 
 export interface ProjectIndex {
@@ -45,4 +48,5 @@ export type DialogState =
   | { kind: 'shortcuts' }
   | { kind: 'licenses' }
   | { kind: 'export' }
+  | { kind: 'git' }
   | null
