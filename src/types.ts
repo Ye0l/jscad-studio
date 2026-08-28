@@ -1,3 +1,5 @@
+import type { DockNode } from './dock/types'
+
 export type ProjectTemplate = 'blank' | 'keycap' | 'plate'
 
 export interface ProjectMeta {
@@ -19,11 +21,8 @@ export interface AppSettings {
   uiScale: number
   rotateSensitivity: number
   zoomSensitivity: number
-  sidebarOpen: boolean
-  consoleOpen: boolean
-  sidebarWidth: number
-  splitRatio: number
-  consoleHeight: number
+  /** 도크 레이아웃. 처음 실행이거나 저장본이 깨졌으면 null */
+  dock: DockNode | null
 }
 
 export interface ProjectIndex {

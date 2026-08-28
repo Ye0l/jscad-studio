@@ -1,33 +1,41 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import {
-  Box, Braces, ChevronRight, CircleHelp, Code2, Download, Eye, FolderOpen, Grid3X3,
-  Menu, MoreVertical, Play, Plus, Save, Search, Settings, Trash2, X,
+  Box, Braces, ChevronRight, Code2, Download, Eye, FolderOpen, Grid3X3, LayoutGrid,
+  Play, Plus, Save, Settings, Terminal, Trash2, X,
 } from 'lucide-react'
 import { CodeEditor, type CodeEditorHandle } from './components/CodeEditor'
+import { ContextMenu, type MenuItem } from './components/ContextMenu'
+import { DockView, type TabInfo } from './components/DockView'
 import { Licenses } from './components/Licenses'
 import { Modal } from './components/Modal'
-import { PanelDivider, type ResizeAxis, type ResizePoint } from './components/PanelDivider'
+import { ProjectList } from './components/ProjectList'
 import { SnippetPalette, type DropPoint } from './components/SnippetPalette'
 import { Toggle } from './components/Toggle'
 import { Viewer } from './components/Viewer'
+import {
+  allTabs, defaultLayout, isDockNode, makeTab, openTab, openTabAtRoot,
+  pruneTabs, readTab, removeTab, reserveIds,
+} from './dock/layout'
+import type { DockNode, TabId, ViewKind } from './dock/types'
 import { EXPORT_FORMATS, exportGeometries, measureModel, type ExportFormat } from './exporter'
 import { runJscad } from './jscadRunner'
-import { DEFAULT_SETTINGS, storage } from './storage'
+import { storage } from './storage'
 import type { PaletteItem } from './jscadApi'
 import { TEMPLATE_LABELS } from './templates'
 import type { AppSettings, DialogState, Project, ProjectIndex, ProjectTemplate } from './types'
 
 interface ToastState { id: number; message: string; tone: 'success' | 'error' | 'info' }
 
-// 손잡이를 끌 때 각 패널이 최소한 유지하는 크기(px)
-const MIN_PANE = 180
-const MIN_SIDEBAR = 170
-const MAX_SIDEBAR = 420
-const MIN_CONSOLE = 90
+type RunState = 'idle' | 'running' | 'success' | 'error'
 
-interface PanelLayout { sidebarWidth: number; splitRatio: number; consoleHeight: number }
-
-const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
+/** 열려 있는 프로젝트 하나의 상태. 편집기·미리보기·출력이 모두 여기를 본다 */
+interface OpenDoc {
+  project: Project
+  dirty: boolean
+  geometries: unknown[]
+  runState: RunState
+  runMessage: string
+}
 
 const DIALOG_TITLES: Record<NonNullable<DialogState>['kind'], string> = {
   new: '새 프로젝트',
@@ -39,17 +47,17 @@ const DIALOG_TITLES: Record<NonNullable<DialogState>['kind'], string> = {
   export: '내보내기',
 }
 
-const formatTime = (iso: string) => new Intl.DateTimeFormat('ko-KR', {
-  month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
-}).format(new Date(iso))
+const VIEW_LABELS: Record<Exclude<ViewKind, 'editor' | 'preview'>, string> = {
+  projects: '프로젝트',
+  shapes: '도형',
+  console: '출력',
+}
 
 export function App() {
   const [index, setIndex] = useState<ProjectIndex | null>(null)
-  const [project, setProject] = useState<Project | null>(null)
-  const [geometries, setGeometries] = useState<unknown[]>([])
-  const [runState, setRunState] = useState<'idle' | 'running' | 'success' | 'error'>('idle')
-  const [runMessage, setRunMessage] = useState('준비 중…')
-  const [dirty, setDirty] = useState(false)
+  const [docs, setDocs] = useState<Record<string, OpenDoc>>({})
+  const [focusedId, setFocusedId] = useState<string | null>(null)
+  const [dock, setDock] = useState<DockNode | null>(null)
   const [dialog, setDialog] = useState<DialogState>(null)
   const [dialogClosing, setDialogClosing] = useState(false)
   const [newName, setNewName] = useState('새 프로젝트')
@@ -58,21 +66,15 @@ export function App() {
   const [query, setQuery] = useState('')
   const [showGrid, setShowGrid] = useState(true)
   const [toasts, setToasts] = useState<ToastState[]>([])
+  const [menu, setMenu] = useState<{ point: { x: number; y: number }; items: MenuItem[] } | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const saveTimerRef = useRef<number | null>(null)
-  const workspaceRef = useRef<HTMLElement>(null)
-  const editorRef = useRef<HTMLElement>(null)
-  const previewRef = useRef<HTMLElement>(null)
-  const consoleRef = useRef<HTMLElement>(null)
-  // 끄는 동안에는 로컬 상태로만 반영하고, 손을 뗄 때 한 번만 설정에 저장한다
-  const [panels, setPanels] = useState<PanelLayout | null>(null)
-  const panelsRef = useRef<PanelLayout | null>(null)
-  const [resizeAxis, setResizeAxis] = useState<ResizeAxis | null>(null)
-  const [sidebarTab, setSidebarTab] = useState<'projects' | 'shapes'>('projects')
-  const editorApiRef = useRef<CodeEditorHandle | null>(null)
+  const loadingRef = useRef(new Set<string>())
+  const editorApis = useRef(new Map<string, { current: CodeEditorHandle | null }>())
 
   const settings = index?.settings
   const motion = settings?.motion ?? true
+  const doc = focusedId ? docs[focusedId] ?? null : null
 
   const toast = useCallback((message: string, tone: ToastState['tone'] = 'info') => {
     const id = Date.now() + Math.random()
@@ -80,103 +82,176 @@ export function App() {
     window.setTimeout(() => setToasts((items) => items.filter((item) => item.id !== id)), 3100)
   }, [])
 
+  const patchDoc = useCallback((id: string, changes: Partial<OpenDoc>) => {
+    setDocs((current) => (current[id] ? { ...current, [id]: { ...current[id], ...changes } } : current))
+  }, [])
+
+  const execute = useCallback(async (id: string, source?: string) => {
+    const code = source ?? docs[id]?.project.code
+    if (!code) return
+    patchDoc(id, { runState: 'running', runMessage: '모델 계산 중…' })
+    try {
+      const result = await runJscad(code)
+      patchDoc(id, {
+        geometries: result.geometries,
+        runState: 'success',
+        runMessage: `${result.geometries.length}개 형상 · ${result.durationMs.toFixed(1)}ms`,
+      })
+    } catch (error) {
+      patchDoc(id, { runState: 'error', runMessage: error instanceof Error ? error.message : String(error) })
+    }
+  }, [docs, patchDoc])
+
+  /** 아직 안 열린 프로젝트면 저장소에서 읽어 온 뒤 한 번 실행한다 */
+  const ensureDoc = useCallback(async (id: string, source?: ProjectIndex) => {
+    const from = source ?? index
+    if (!from || docs[id] || loadingRef.current.has(id)) return
+    const meta = from.projects.find((item) => item.id === id)
+    if (!meta) return
+    loadingRef.current.add(id)
+    try {
+      const project = await storage.loadProject(meta)
+      setDocs((current) => ({
+        ...current,
+        [id]: { project, dirty: false, geometries: [], runState: 'idle', runMessage: '준비 중…' },
+      }))
+      void execute(id, project.code)
+    } catch (error) {
+      toast(`프로젝트 열기 실패: ${String(error)}`, 'error')
+    } finally {
+      loadingRef.current.delete(id)
+    }
+  }, [index, docs, execute, toast])
+
   useEffect(() => {
     storage.initialize()
-      .then(({ index: loadedIndex, active }) => {
-        setIndex(loadedIndex)
-        setProject(active)
+      .then(({ index: loaded, active }) => {
+        setIndex(loaded)
+        setDocs({ [active.id]: { project: active, dirty: false, geometries: [], runState: 'idle', runMessage: '준비 중…' } })
+        setFocusedId(active.id)
+
+        const known = new Set(loaded.projects.map((item) => item.id))
+        const stored = loaded.settings.dock
+        let restored: DockNode | null = null
+        if (isDockNode(stored)) {
+          reserveIds(stored)
+          restored = pruneTabs(stored, (tab) => {
+            const { projectId } = readTab(tab)
+            return !projectId || known.has(projectId)
+          })
+        }
+        const layout = restored ?? defaultLayout(active.id)
+        setDock(layout)
+        void execute(active.id, active.code)
+        // 저장된 레이아웃이 다른 프로젝트도 열어 두었다면 함께 불러온다
+        for (const tab of allTabs(layout)) {
+          const { projectId } = readTab(tab)
+          if (projectId && projectId !== active.id) void ensureDoc(projectId, loaded)
+        }
       })
-      .catch((error) => {
-        setRunState('error')
-        setRunMessage(`저장소 초기화 실패: ${String(error)}`)
-        toast('프로젝트 저장소를 열지 못했습니다.', 'error')
-      })
-  }, [toast])
+      .catch((error) => toast(`저장소 초기화 실패: ${String(error)}`, 'error'))
+    // 최초 1회만 실행한다
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   useEffect(() => {
     document.documentElement.classList.toggle('motion-off', !motion)
   }, [motion])
 
-  const execute = useCallback(async (code = project?.code) => {
-    if (!code) return
-    setRunState('running')
-    setRunMessage('모델 계산 중…')
-    try {
-      const result = await runJscad(code)
-      setGeometries(result.geometries)
-      setRunState('success')
-      setRunMessage(`${result.geometries.length}개 형상 · ${result.durationMs.toFixed(1)}ms`)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      setRunState('error')
-      setRunMessage(message)
+  const updateSettings = useCallback((changes: Partial<AppSettings>) => {
+    setIndex((current) => {
+      if (!current) return current
+      const next = { ...current, settings: { ...current.settings, ...changes } }
+      void storage.saveIndex(next).catch((error) => toast(`설정 저장 실패: ${String(error)}`, 'error'))
+      return next
+    })
+  }, [toast])
+
+  const applyDock = useCallback((next: DockNode | null, persist = false) => {
+    setDock(next)
+    if (persist) updateSettings({ dock: next })
+  }, [updateSettings])
+
+  const openView = useCallback((kind: ViewKind, projectId?: string) => {
+    const tab = makeTab(kind, projectId)
+    if (projectId) {
+      void ensureDoc(projectId)
+      setFocusedId(projectId)
     }
-  }, [project?.code])
+    // 출력은 전체 폭을 차지하도록 트리 맨 아래에 붙인다
+    applyDock(kind === 'console' ? openTabAtRoot(dock, tab, 'bottom') : openTab(dock, tab), true)
+  }, [dock, ensureDoc, applyDock])
 
-  useEffect(() => {
-    if (!project) return
-    void execute(project.code)
-    // Run once when switching projects; live runs are handled below.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project?.id])
+  const toggleView = useCallback((kind: ViewKind, projectId?: string) => {
+    const tab = makeTab(kind, projectId)
+    if (dock && allTabs(dock).includes(tab)) {
+      applyDock(removeTab(dock, tab), true)
+      return
+    }
+    openView(kind, projectId)
+  }, [dock, applyDock, openView])
 
-  useEffect(() => {
-    if (!project || !settings?.autoRun || !dirty) return
-    const timer = window.setTimeout(() => void execute(project.code), 480)
-    return () => window.clearTimeout(timer)
-  }, [project?.code, project, settings?.autoRun, dirty, execute])
+  // ---- 저장 ----
 
   const buildSavedState = useCallback((target: Project, sourceIndex: ProjectIndex) => {
     const saved = { ...target, updatedAt: new Date().toISOString() }
+    const meta = { id: saved.id, name: saved.name, createdAt: saved.createdAt, updatedAt: saved.updatedAt }
     const nextIndex = {
       ...sourceIndex,
       activeProjectId: saved.id,
-      projects: sourceIndex.projects.map((item) => item.id === saved.id
-        ? { id: saved.id, name: saved.name, createdAt: saved.createdAt, updatedAt: saved.updatedAt }
-        : item),
+      projects: sourceIndex.projects.map((item) => (item.id === saved.id ? meta : item)),
     }
-    if (!nextIndex.projects.some((item) => item.id === saved.id)) {
-      nextIndex.projects.unshift({ id: saved.id, name: saved.name, createdAt: saved.createdAt, updatedAt: saved.updatedAt })
-    }
+    if (!nextIndex.projects.some((item) => item.id === saved.id)) nextIndex.projects.unshift(meta)
     return { saved, nextIndex }
   }, [])
 
-  const saveNow = useCallback(async (announce = true) => {
-    if (!project || !index) return
-    const { saved, nextIndex } = buildSavedState(project, index)
-    try {
-      await storage.saveProject(saved, nextIndex)
-      setProject(saved)
-      setIndex(nextIndex)
-      setDirty(false)
-      if (announce) toast('프로젝트를 저장했습니다.', 'success')
-    } catch (error) {
-      toast(`저장 실패: ${String(error)}`, 'error')
+  const saveDocs = useCallback(async (ids: string[], announce: boolean) => {
+    if (!index) return
+    let nextIndex = index
+    for (const id of ids) {
+      const target = docs[id]
+      if (!target) continue
+      const { saved, nextIndex: updated } = buildSavedState(target.project, nextIndex)
+      try {
+        await storage.saveProject(saved, updated)
+        nextIndex = updated
+        patchDoc(id, { project: saved, dirty: false })
+      } catch (error) {
+        toast(`저장 실패: ${String(error)}`, 'error')
+        return
+      }
     }
-  }, [project, index, buildSavedState, toast])
+    setIndex(nextIndex)
+    if (announce) toast('프로젝트를 저장했습니다.', 'success')
+  }, [index, docs, buildSavedState, patchDoc, toast])
+
+  const dirtyIds = useMemo(() => Object.values(docs).filter((item) => item.dirty).map((item) => item.project.id), [docs])
+  const dirtySignature = dirtyIds.join(',') + Object.values(docs).map((item) => item.project.code.length).join(',')
 
   useEffect(() => {
-    if (!project || !index || !dirty || !settings?.autoSave) return
+    if (!settings?.autoSave || !dirtyIds.length) return
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
-    saveTimerRef.current = window.setTimeout(() => void saveNow(false), 850)
-    return () => {
-      if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current)
-    }
-  }, [project?.code, project, index, dirty, settings?.autoSave, saveNow])
+    saveTimerRef.current = window.setTimeout(() => void saveDocs(dirtyIds, false), 850)
+    return () => { if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current) }
+    // 코드 길이까지 서명에 넣어 편집이 이어지는 동안 타이머를 미룬다
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirtySignature, settings?.autoSave])
+
+  const focusedCode = doc?.project.code
+  useEffect(() => {
+    if (!settings?.autoRun || !focusedId || !doc?.dirty || !focusedCode) return
+    const timer = window.setTimeout(() => void execute(focusedId, focusedCode), 480)
+    return () => window.clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusedId, focusedCode, doc?.dirty, settings?.autoRun])
+
+  // ---- 프로젝트 관리 ----
 
   const closeDialog = useCallback((after?: () => void) => {
     if (!dialog) return
-    if (!motion) {
-      setDialog(null)
-      after?.()
-      return
-    }
+    if (!motion) { setDialog(null); after?.(); return }
     setDialogClosing(true)
-    window.setTimeout(() => {
-      setDialog(null)
-      setDialogClosing(false)
-      after?.()
-    }, 170)
+    window.setTimeout(() => { setDialog(null); setDialogClosing(false); after?.() }, 170)
   }, [dialog, motion])
 
   const openNewDialog = useCallback(() => {
@@ -195,304 +270,309 @@ export function App() {
     }
     await storage.saveProject(created, nextIndex)
     setIndex(nextIndex)
-    setProject(created)
-    setDirty(false)
+    setDocs((current) => ({
+      ...current,
+      [created.id]: { project: created, dirty: false, geometries: [], runState: 'idle', runMessage: '준비 중…' },
+    }))
+    setFocusedId(created.id)
+    applyDock(openTab(dock, makeTab('editor', created.id)), true)
+    void execute(created.id, created.code)
     toast(`${created.name} 프로젝트를 만들었습니다.`, 'success')
-  }, [index, newName, newTemplate, toast])
+  }, [index, dock, newName, newTemplate, execute, applyDock, toast])
 
-  const switchProject = useCallback(async (id: string) => {
-    if (!index || project?.id === id) return
-    if (dirty && project) await saveNow(false)
+  const renameProject = useCallback(async (id: string) => {
+    if (!index || !renameValue.trim()) return
     const meta = index.projects.find((item) => item.id === id)
     if (!meta) return
     try {
-      const loaded = await storage.loadProject(meta)
-      const nextIndex = { ...index, activeProjectId: id }
-      await storage.saveIndex(nextIndex)
+      // 열려 있지 않은 프로젝트도 코드를 지우지 않도록 원본을 먼저 읽는다
+      const current = docs[id]?.project ?? await storage.loadProject(meta)
+      const { saved, nextIndex } = buildSavedState({ ...current, name: renameValue.trim() }, index)
+      await storage.saveProject(saved, nextIndex)
+      patchDoc(saved.id, { project: saved, dirty: false })
       setIndex(nextIndex)
-      setProject(loaded)
-      setDirty(false)
+      toast('프로젝트 이름을 바꿨습니다.', 'success')
     } catch (error) {
-      toast(`프로젝트 열기 실패: ${String(error)}`, 'error')
+      toast(`이름 변경 실패: ${String(error)}`, 'error')
     }
-  }, [index, project, dirty, saveNow, toast])
+  }, [index, docs, renameValue, buildSavedState, patchDoc, toast])
 
-  const renameProject = useCallback(async () => {
-    if (!index || !project || !renameValue.trim()) return
-    const renamed = { ...project, name: renameValue.trim(), updatedAt: new Date().toISOString() }
-    const { nextIndex } = buildSavedState(renamed, index)
-    await storage.saveProject(renamed, nextIndex)
-    setProject(renamed)
-    setIndex(nextIndex)
-    setDirty(false)
-    toast('프로젝트 이름을 바꿨습니다.', 'success')
-  }, [index, project, renameValue, buildSavedState, toast])
-
-  const deleteProject = useCallback(async () => {
-    if (!index || !project) return
+  const deleteProject = useCallback(async (target: Project) => {
+    if (!index) return
     if (index.projects.length === 1) {
       toast('마지막 프로젝트는 삭제할 수 없습니다.', 'error')
       return
     }
-    const remaining = index.projects.filter((item) => item.id !== project.id)
-    const nextMeta = remaining[0]
-    const nextIndex = { ...index, activeProjectId: nextMeta.id, projects: remaining }
-    await storage.deleteProject(project.id, nextIndex)
-    const loaded = await storage.loadProject(nextMeta)
+    const remaining = index.projects.filter((item) => item.id !== target.id)
+    const nextIndex = { ...index, activeProjectId: remaining[0].id, projects: remaining }
+    await storage.deleteProject(target.id, nextIndex)
     setIndex(nextIndex)
-    setProject(loaded)
-    setDirty(false)
+    setDocs((current) => {
+      const next = { ...current }
+      delete next[target.id]
+      return next
+    })
+    applyDock(pruneTabs(dock, (tab) => readTab(tab).projectId !== target.id), true)
+    if (focusedId === target.id) setFocusedId(remaining[0].id)
     toast('프로젝트를 삭제했습니다.', 'success')
-  }, [index, project, toast])
+  }, [index, dock, focusedId, applyDock, toast])
 
   const exportModel = useCallback((format: ExportFormat) => {
-    if (!project) return
+    if (!doc) return
     // 브라우저 내려받기는 사용자 조작과 같은 흐름에서 시작해야 막히지 않는다
-    exportGeometries(project.name, format, geometries)
+    exportGeometries(doc.project.name, format, doc.geometries)
       .then((target) => { if (target) toast(`${target} 로 내보냈습니다.`, 'success') })
       .catch((error) => toast(`내보내기 실패: ${String(error)}`, 'error'))
-  }, [project, geometries, toast])
+  }, [doc, toast])
 
-  const updateSettings = useCallback((changes: Partial<AppSettings>) => {
-    if (!index) return
-    const next = { ...index, settings: { ...index.settings, ...changes } }
-    setIndex(next)
-    void storage.saveIndex(next).catch((error) => toast(`설정 저장 실패: ${String(error)}`, 'error'))
-  }, [index, toast])
+  // ---- 도형 팔레트가 코드에 넣기 ----
+
+  const apiRefFor = useCallback((id: string) => {
+    const existing = editorApis.current.get(id)
+    if (existing) return existing
+    const created = { current: null as CodeEditorHandle | null }
+    editorApis.current.set(id, created)
+    return created
+  }, [])
+
+  const editorAt = (point: DropPoint | null) => {
+    if (!point) return null
+    const stack = document.elementsFromPoint(point.x, point.y)
+    const host = stack.find((element) => element instanceof HTMLElement && element.dataset.editorProject) as HTMLElement | undefined
+    return host?.dataset.editorProject ?? null
+  }
+
+  const overEditor = (point: DropPoint | null) => {
+    const id = editorAt(point)
+    editorApis.current.forEach((ref, key) => { if (key !== id) ref.current?.showDropTarget(null) })
+    if (!id || !point) return false
+    const api = editorApis.current.get(id)?.current
+    api?.showDropTarget(point)
+    return !!api
+  }
+
+  const insertSnippet = (item: PaletteItem, point?: DropPoint) => {
+    const id = (point ? editorAt(point) : null) ?? focusedId
+    const api = id ? editorApis.current.get(id)?.current : null
+    if (!api) {
+      toast('먼저 편집기 탭을 여세요.', 'error')
+      return
+    }
+    api.insertSnippet({ code: item.code, requires: item.requires }, point)
+    api.showDropTarget(null)
+  }
+
+  // ---- 단축키 ----
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const mod = event.ctrlKey || event.metaKey
-      if (event.key === 'Escape' && dialog) {
-        event.preventDefault(); closeDialog(); return
-      }
-      if (event.key === 'F1') {
-        event.preventDefault(); setDialog({ kind: 'shortcuts' }); return
-      }
+      if (event.key === 'Escape' && dialog) { event.preventDefault(); closeDialog(); return }
+      if (event.key === 'F1') { event.preventDefault(); setDialog({ kind: 'shortcuts' }); return }
       if (!mod) return
       const key = event.key.toLowerCase()
-      if (key === 's') { event.preventDefault(); void saveNow() }
-      if (key === 'enter') { event.preventDefault(); void execute() }
+      if (key === 's') { event.preventDefault(); void saveDocs(focusedId ? [focusedId] : [], true) }
+      if (key === 'enter') { event.preventDefault(); if (focusedId) void execute(focusedId) }
       if (key === 'n') { event.preventDefault(); openNewDialog() }
-      if (key === 'p') { event.preventDefault(); updateSettings({ sidebarOpen: true }); setTimeout(() => searchRef.current?.focus(), 80) }
+      if (key === 'p') { event.preventDefault(); openView('projects'); window.setTimeout(() => searchRef.current?.focus(), 80) }
       if (key === 'e') { event.preventDefault(); setDialog({ kind: 'export' }) }
       if (key === ',') { event.preventDefault(); setDialog({ kind: 'settings' }) }
-      if (key === 'b') { event.preventDefault(); updateSettings({ sidebarOpen: !settings?.sidebarOpen }) }
-      if (key === 'j') { event.preventDefault(); updateSettings({ consoleOpen: !settings?.consoleOpen }) }
+      if (key === 'b') { event.preventDefault(); toggleView('projects') }
+      if (key === 'j') { event.preventDefault(); toggleView('console') }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [dialog, closeDialog, saveNow, execute, openNewDialog, updateSettings, settings?.sidebarOpen, settings?.consoleOpen])
+  }, [dialog, closeDialog, saveDocs, execute, focusedId, openNewDialog, openView, toggleView])
 
-  const filteredProjects = useMemo(() => index?.projects.filter((item) => item.name.toLowerCase().includes(query.toLowerCase())) ?? [], [index?.projects, query])
+  const filteredProjects = useMemo(
+    () => index?.projects.filter((item) => item.name.toLowerCase().includes(query.toLowerCase())) ?? [],
+    [index?.projects, query],
+  )
 
-  if (!index || !project || !settings) {
+  if (!index || !settings) {
     return <div className="boot-screen"><Box size={32} /><span>JSCAD Studio 여는 중…</span></div>
   }
 
-  const stats = dialog?.kind === 'export' ? measureModel(geometries) : null
+  const stats = dialog?.kind === 'export' && doc ? measureModel(doc.geometries) : null
+  const openProjectIds = [...new Set((dock ? allTabs(dock) : []).map((tab) => readTab(tab).projectId).filter(Boolean))] as string[]
 
-  const layout: PanelLayout = panels ?? {
-    sidebarWidth: settings.sidebarWidth,
-    splitRatio: settings.splitRatio,
-    consoleHeight: settings.consoleHeight,
-  }
-  panelsRef.current = layout
-
-  const applyLayout = (changes: Partial<PanelLayout>, persist = false) => {
-    const next = { ...layout, ...changes }
-    panelsRef.current = next
-    setPanels(next)
-    if (persist) updateSettings(next)
-  }
-
-  const endResize = () => {
-    setResizeAxis(null)
-    if (panelsRef.current) updateSettings(panelsRef.current)
-  }
-
-  const resizeSidebar = (point: ResizePoint, rect: DOMRect) => {
-    const area = workspaceRef.current?.getBoundingClientRect()
-    if (!area) return
-    const max = Math.min(MAX_SIDEBAR, Math.max(MIN_SIDEBAR, area.width - MIN_PANE * 2))
-    applyLayout({ sidebarWidth: clamp(point.x - area.left - rect.width / 2, MIN_SIDEBAR, max) })
-  }
-
-  // 손잡이가 가로로 길면 편집기와 미리보기가 위아래로 놓인 상태다
-  const resizeSplit = (point: ResizePoint, rect: DOMRect) => {
-    const editor = editorRef.current?.getBoundingClientRect()
-    const preview = previewRef.current?.getBoundingClientRect()
-    if (!editor || !preview) return
-    const stacked = rect.width > rect.height
-    const start = stacked ? editor.top : editor.left
-    const total = (stacked ? preview.bottom : preview.right) - start
-    if (total <= MIN_PANE * 2) return
-    const offset = (stacked ? point.y : point.x) - start - (stacked ? rect.height : rect.width) / 2
-    applyLayout({ splitRatio: clamp(offset / total, MIN_PANE / total, 1 - MIN_PANE / total) })
+  const projectMenu = (id: string, point: { x: number; y: number }) => {
+    const meta = index.projects.find((item) => item.id === id)
+    if (!meta) return
+    setMenu({
+      point,
+      items: [
+        { id: 'code', label: '코드 열기', icon: <Code2 size={15} />, onSelect: () => openView('editor', id) },
+        { id: 'preview', label: '미리보기 열기', icon: <Eye size={15} />, onSelect: () => openView('preview', id) },
+        { id: 'both', label: '코드와 미리보기 함께 열기', icon: <LayoutGrid size={15} />, onSelect: () => { openView('editor', id); openView('preview', id) } },
+        {
+          id: 'rename',
+          label: '이름 바꾸기',
+          icon: <Braces size={15} />,
+          onSelect: () => { setRenameValue(meta.name); setDialog({ kind: 'rename', project: { ...meta, code: '' } }) },
+        },
+        {
+          id: 'delete',
+          label: '삭제',
+          icon: <Trash2 size={15} />,
+          danger: true,
+          onSelect: () => setDialog({ kind: 'delete', project: { ...meta, code: '' } }),
+        },
+      ],
+    })
   }
 
-  const overEditor = (point: DropPoint | null) => {
-    if (!point) {
-      editorApiRef.current?.showDropTarget(null)
-      return false
+  const describeTab = (tab: TabId): TabInfo => {
+    const { kind, projectId } = readTab(tab)
+    if (kind === 'projects') return { label: VIEW_LABELS.projects, icon: <FolderOpen size={14} /> }
+    if (kind === 'shapes') return { label: VIEW_LABELS.shapes, icon: <Box size={14} /> }
+    if (kind === 'console') return { label: VIEW_LABELS.console, icon: <Terminal size={14} /> }
+    const target = projectId ? docs[projectId] : null
+    const name = target?.project.name ?? index.projects.find((item) => item.id === projectId)?.name ?? '프로젝트'
+    return kind === 'editor'
+      ? { label: name, icon: <Code2 size={14} />, dirty: target?.dirty }
+      : { label: `${name} 미리보기`, icon: <Eye size={14} /> }
+  }
+
+  const renderView = (tab: TabId) => {
+    const { kind, projectId } = readTab(tab)
+    if (kind === 'projects') {
+      return (
+        <ProjectList
+          projects={filteredProjects}
+          openIds={openProjectIds}
+          focusedId={focusedId}
+          query={query}
+          onQuery={setQuery}
+          searchRef={searchRef}
+          onOpen={(id) => openView('editor', id)}
+          onMenu={projectMenu}
+          onNew={openNewDialog}
+        />
+      )
     }
-    const rect = editorRef.current?.getBoundingClientRect()
-    const inside = !!rect && point.x >= rect.left && point.x <= rect.right && point.y >= rect.top && point.y <= rect.bottom
-    editorApiRef.current?.showDropTarget(inside ? point : null)
-    return inside
+    if (kind === 'shapes') {
+      return (
+        <SnippetPalette
+          onInsert={(item) => insertSnippet(item)}
+          onDrop={(item, point) => insertSnippet(item, point)}
+          onDragOver={overEditor}
+        />
+      )
+    }
+    if (kind === 'console') {
+      return <pre className={`console-output${doc?.runState === 'error' ? ' error-text' : ''}`}>{doc?.runMessage ?? '준비 중…'}</pre>
+    }
+    const target = projectId ? docs[projectId] : null
+    if (!projectId || !target) return <div className="dock-empty">불러오는 중…</div>
+    if (kind === 'editor') {
+      return (
+        <div className="editor-host" data-editor-project={projectId} onPointerDown={() => setFocusedId(projectId)}>
+          <CodeEditor
+            value={target.project.code}
+            fontSize={settings.fontSize}
+            apiRef={apiRefFor(projectId)}
+            onChange={(code) => patchDoc(projectId, { project: { ...target.project, code }, dirty: true })}
+          />
+        </div>
+      )
+    }
+    return (
+      <div className="viewer-wrap" onPointerDown={() => setFocusedId(projectId)}>
+        <Viewer
+          geometries={target.geometries}
+          showGrid={showGrid}
+          rotateSensitivity={settings.rotateSensitivity}
+          zoomSensitivity={settings.zoomSensitivity}
+        />
+        <div className="viewer-hint">드래그: 회전 · Shift+드래그: 이동 · 휠/핀치: 확대</div>
+        {target.runState === 'error' && <div className="error-overlay"><X size={18} /><span>{target.runMessage}</span></div>}
+      </div>
+    )
   }
 
-  const insertSnippet = (item: PaletteItem, point?: DropPoint) => {
-    editorApiRef.current?.insertSnippet({ code: item.code, requires: item.requires }, point)
-    editorApiRef.current?.showDropTarget(null)
+  const renderActions = (tab: TabId) => {
+    const { kind } = readTab(tab)
+    if (kind === 'projects') {
+      return <button className="icon-button tiny" onClick={openNewDialog} aria-label="새 프로젝트"><Plus size={16} /></button>
+    }
+    if (kind === 'preview') {
+      return (
+        <button className={`icon-button tiny${showGrid ? ' selected' : ''}`} onClick={() => setShowGrid((value) => !value)} aria-label="그리드 토글">
+          <Grid3X3 size={16} />
+        </button>
+      )
+    }
+    return null
   }
 
-  const resizeConsole = (point: ResizePoint, rect: DOMRect) => {
-    const area = workspaceRef.current?.getBoundingClientRect()
-    const panel = consoleRef.current?.getBoundingClientRect()
-    if (!area || !panel) return
-    const max = Math.max(MIN_CONSOLE, area.height + panel.height - MIN_PANE)
-    applyLayout({ consoleHeight: clamp(panel.bottom - point.y - rect.height / 2, MIN_CONSOLE, max) })
-  }
+  const runState = doc?.runState ?? 'idle'
+  const runMessage = doc?.runMessage ?? '프로젝트를 열어 주세요.'
 
   return (
     <div
-      className={`app-shell${settings.sidebarOpen ? '' : ' sidebar-closed'}${settings.consoleOpen ? ' console-open' : ''}${resizeAxis ? ' is-resizing' : ''}`}
-      data-resize-axis={resizeAxis ?? undefined}
+      className="app-shell"
       style={{
         width: `${100 / settings.uiScale}%`,
         height: `${100 / settings.uiScale}%`,
         transform: `scale(${settings.uiScale})`,
         transformOrigin: 'top left',
-        '--sidebar-w': `${layout.sidebarWidth}px`,
-        '--split': layout.splitRatio,
-        '--console-h': `${layout.consoleHeight}px`,
       } as CSSProperties}
     >
       <header className="topbar">
         <div className="brand">
-          <button className="icon-button sidebar-toggle" onClick={() => updateSettings({ sidebarOpen: !settings.sidebarOpen })} aria-label="프로젝트 패널 토글"><Menu size={20} /></button>
           <div className="brand-mark"><Braces size={20} /></div>
           <span>JSCAD Studio</span>
           <ChevronRight size={15} className="muted" />
-          <strong>{project.name}</strong>
-          {dirty && <span className="dirty-dot" title="저장되지 않은 변경" />}
+          <strong>{doc?.project.name ?? '열린 프로젝트 없음'}</strong>
+          {doc?.dirty && <span className="dirty-dot" title="저장되지 않은 변경" />}
         </div>
         <div className="top-actions">
-          <button className="button ghost" onClick={() => void saveNow()}><Save size={17} /><span>저장</span><kbd>Ctrl S</kbd></button>
-          <button className="button primary" onClick={() => void execute()} disabled={runState === 'running'}><Play size={17} fill="currentColor" /><span>실행</span><kbd>Ctrl ↵</kbd></button>
+          <button className="button ghost" onClick={() => void saveDocs(focusedId ? [focusedId] : [], true)} disabled={!doc}><Save size={17} /><span>저장</span><kbd>Ctrl S</kbd></button>
+          <button className="button primary" onClick={() => focusedId && void execute(focusedId)} disabled={!doc || runState === 'running'}><Play size={17} fill="currentColor" /><span>실행</span><kbd>Ctrl ↵</kbd></button>
           <button className="icon-button" onClick={() => setDialog({ kind: 'export' })} aria-label="내보내기" title="STL·3MF 내보내기 (Ctrl E)"><Download size={19} /></button>
           <button className="icon-button" onClick={() => setDialog({ kind: 'settings' })} aria-label="설정"><Settings size={19} /></button>
         </div>
       </header>
 
-      <main className="workspace" ref={workspaceRef}>
-        <aside className="sidebar">
-          <div className="panel-heading">
-            <div className="sidebar-tabs" role="tablist">
-              <button role="tab" aria-selected={sidebarTab === 'projects'} className={sidebarTab === 'projects' ? 'selected' : ''} onClick={() => setSidebarTab('projects')}>프로젝트</button>
-              <button role="tab" aria-selected={sidebarTab === 'shapes'} className={sidebarTab === 'shapes' ? 'selected' : ''} onClick={() => setSidebarTab('shapes')}>도형</button>
-            </div>
-            {sidebarTab === 'projects' && <button className="icon-button tiny" onClick={openNewDialog} aria-label="새 프로젝트"><Plus size={17} /></button>}
-          </div>
-          {sidebarTab === 'projects' ? (
-            <>
-              <label className="search-box"><Search size={15} /><input ref={searchRef} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="프로젝트 검색" /><kbd>Ctrl P</kbd></label>
-              <nav className="project-list">
-                {filteredProjects.map((item) => (
-                  <button key={item.id} className={`project-item${item.id === project.id ? ' active' : ''}`} onClick={() => void switchProject(item.id)}>
-                    <span className="project-icon"><Code2 size={17} /></span>
-                    <span className="project-copy"><strong>{item.name}</strong><small>{formatTime(item.updatedAt)}</small></span>
-                    {item.id === project.id && <span className="active-pip" />}
-                  </button>
-                ))}
-              </nav>
-              <button className="new-project-button" onClick={openNewDialog}><Plus size={17} />새 프로젝트 <kbd>Ctrl N</kbd></button>
-            </>
-          ) : (
-            <SnippetPalette
-              onInsert={(item) => insertSnippet(item)}
-              onDrop={(item, point) => insertSnippet(item, point)}
-              onDragOver={overEditor}
-            />
-          )}
-        </aside>
-
-        <PanelDivider
-          className="panel-divider--sidebar"
-          label="프로젝트 패널 너비 조절"
-          onResize={resizeSidebar}
-          onNudge={(direction) => applyLayout({ sidebarWidth: clamp(layout.sidebarWidth + direction * 16, MIN_SIDEBAR, MAX_SIDEBAR) }, true)}
-          onReset={() => applyLayout({ sidebarWidth: DEFAULT_SETTINGS.sidebarWidth }, true)}
-          onActive={(axis) => (axis ? setResizeAxis(axis) : endResize())}
-        />
-
-
-        <section className="editor-panel" ref={editorRef}>
-          <div className="panel-heading tab-heading">
-            <span><Code2 size={15} />main.jscad</span>
-            <div>
-              <button className="icon-button tiny" onClick={() => { setRenameValue(project.name); setDialog({ kind: 'rename', project }) }} aria-label="프로젝트 메뉴"><MoreVertical size={17} /></button>
-            </div>
-          </div>
-          <CodeEditor
-            value={project.code}
-            fontSize={settings.fontSize}
-            apiRef={editorApiRef}
-            onChange={(code) => { setProject((current) => current ? { ...current, code } : current); setDirty(true) }}
+      <main className="workspace">
+        {dock ? (
+          <DockView
+            root={dock}
+            describeTab={describeTab}
+            renderView={renderView}
+            renderActions={renderActions}
+            onChange={applyDock}
+            onFocus={(tab) => {
+              const { projectId } = readTab(tab)
+              if (projectId) setFocusedId(projectId)
+            }}
           />
-        </section>
-
-        <PanelDivider
-          className="panel-divider--split"
-          label="편집기와 미리보기 크기 조절"
-          onResize={resizeSplit}
-          onNudge={(direction) => applyLayout({ splitRatio: clamp(layout.splitRatio + direction * 0.02, 0.1, 0.9) }, true)}
-          onReset={() => applyLayout({ splitRatio: DEFAULT_SETTINGS.splitRatio }, true)}
-          onActive={(axis) => (axis ? setResizeAxis(axis) : endResize())}
-        />
-
-        <section className="preview-panel" ref={previewRef}>
-          <div className="panel-heading preview-heading">
-            <span><Eye size={15} />3D 미리보기</span>
-            <div className="preview-actions">
-              <button className={`icon-button tiny${showGrid ? ' selected' : ''}`} onClick={() => setShowGrid((value) => !value)} aria-label="그리드 토글"><Grid3X3 size={17} /></button>
+        ) : (
+          <div className="dock-blank">
+            <p>열린 패널이 없습니다.</p>
+            <div>
+              <button className="button ghost" onClick={() => openView('projects')}><FolderOpen size={16} />프로젝트</button>
+              <button className="button ghost" onClick={() => openView('shapes')}><Box size={16} />도형</button>
+              {focusedId && <button className="button ghost" onClick={() => openView('editor', focusedId)}><Code2 size={16} />코드</button>}
+              {focusedId && <button className="button ghost" onClick={() => openView('preview', focusedId)}><Eye size={16} />미리보기</button>}
+              <button className="button ghost" onClick={() => applyDock(defaultLayout(focusedId ?? index.projects[0].id), true)}><LayoutGrid size={16} />기본 배치</button>
             </div>
           </div>
-          <div className="viewer-wrap">
-            <Viewer
-              geometries={geometries}
-              showGrid={showGrid}
-              rotateSensitivity={settings.rotateSensitivity}
-              zoomSensitivity={settings.zoomSensitivity}
-            />
-            <div className="viewer-hint">드래그: 회전 · Shift+드래그: 이동 · 휠/핀치: 확대</div>
-            {runState === 'error' && <div className="error-overlay"><X size={18} /><span>{runMessage}</span></div>}
-          </div>
-        </section>
+        )}
       </main>
 
-      <PanelDivider
-        className="panel-divider--console"
-        label="출력 패널 높이 조절"
-        onResize={resizeConsole}
-        onNudge={(direction) => applyLayout({ consoleHeight: clamp(layout.consoleHeight - direction * 16, MIN_CONSOLE, 480) }, true)}
-        onReset={() => applyLayout({ consoleHeight: DEFAULT_SETTINGS.consoleHeight }, true)}
-        onActive={(axis) => (axis ? setResizeAxis(axis) : endResize())}
-      />
-
-      <section className="console-panel" ref={consoleRef} aria-hidden={!settings.consoleOpen}>
-        <div className="console-heading"><span>출력</span><button className="icon-button tiny" onClick={() => updateSettings({ consoleOpen: false })}><X size={16} /></button></div>
-        <pre className={runState === 'error' ? 'error-text' : ''}>{runMessage}</pre>
-      </section>
-
       <footer className="statusbar">
-        <button onClick={() => updateSettings({ consoleOpen: !settings.consoleOpen })} className={`run-status ${runState}`}><span />{runState === 'error' ? '오류' : runState === 'running' ? '실행 중' : '준비됨'}</button>
+        <button onClick={() => toggleView('console')} className={`run-status ${runState}`}><span />{runState === 'error' ? '오류' : runState === 'running' ? '실행 중' : '준비됨'}</button>
         <span>{runMessage}</span>
         <span className="status-spacer" />
-        <span>{dirty ? (settings.autoSave ? '자동 저장 대기' : '저장 필요') : '저장됨'}</span>
+        <button onClick={() => toggleView('projects')} title="프로젝트 패널 (Ctrl B)"><FolderOpen size={13} />프로젝트</button>
+        <button onClick={() => toggleView('shapes')} title="도형 팔레트"><Box size={13} />도형</button>
+        <span>{dirtyIds.length ? (settings.autoSave ? '자동 저장 대기' : `저장 필요 ${dirtyIds.length}`) : '저장됨'}</span>
         <button onClick={() => setDialog({ kind: 'shortcuts' })}>F1 단축키</button>
       </footer>
+
+      {menu && <ContextMenu point={menu.point} items={menu.items} onClose={() => setMenu(null)} />}
 
       {dialog && (
         <Modal
@@ -500,8 +580,8 @@ export function App() {
           closing={dialogClosing}
           onClose={() => closeDialog()}
           footer={dialog.kind === 'new' ? <><button className="button ghost" onClick={() => closeDialog()}>취소</button><button className="button primary" disabled={!newName.trim()} onClick={() => closeDialog(() => void createProject())}>만들기</button></>
-            : dialog.kind === 'rename' ? <><button className="button danger" onClick={() => closeDialog(() => setDialog({ kind: 'delete', project }))}><Trash2 size={16} />삭제</button><span className="footer-spacer" /><button className="button ghost" onClick={() => closeDialog()}>취소</button><button className="button primary" disabled={!renameValue.trim()} onClick={() => closeDialog(() => void renameProject())}>저장</button></>
-              : dialog.kind === 'delete' ? <><button className="button ghost" onClick={() => closeDialog()}>취소</button><button className="button danger" onClick={() => closeDialog(() => void deleteProject())}>삭제</button></>
+            : dialog.kind === 'rename' ? <><button className="button danger" onClick={() => closeDialog(() => setDialog({ kind: 'delete', project: dialog.project }))}><Trash2 size={16} />삭제</button><span className="footer-spacer" /><button className="button ghost" onClick={() => closeDialog()}>취소</button><button className="button primary" disabled={!renameValue.trim()} onClick={() => closeDialog(() => void renameProject(dialog.project.id))}>저장</button></>
+              : dialog.kind === 'delete' ? <><button className="button ghost" onClick={() => closeDialog()}>취소</button><button className="button danger" onClick={() => closeDialog(() => void deleteProject(dialog.project))}>삭제</button></>
                 : undefined}
         >
           {dialog.kind === 'new' && <div className="form-stack">
@@ -518,6 +598,7 @@ export function App() {
             <label className="font-setting"><span><strong>편집기 글자 크기</strong><small>물리 키보드 사용 시 가독성 조절</small></span><div><input type="range" min="12" max="22" value={settings.fontSize} onChange={(e) => updateSettings({ fontSize: Number(e.target.value) })} /><output>{settings.fontSize}px</output></div></label>
             <label className="font-setting"><span><strong>3D 회전 감도</strong><small>마우스와 한 손가락 드래그의 회전 속도</small></span><div><input type="range" min="0.1" max="1.2" step="0.05" value={settings.rotateSensitivity} onChange={(e) => updateSettings({ rotateSensitivity: Number(e.target.value) })} /><output>{Math.round(settings.rotateSensitivity * 100)}%</output></div></label>
             <label className="font-setting"><span><strong>확대·축소 감도</strong><small>휠과 두 손가락 핀치의 줌 속도</small></span><div><input type="range" min="0.15" max="1.2" step="0.05" value={settings.zoomSensitivity} onChange={(e) => updateSettings({ zoomSensitivity: Number(e.target.value) })} /><output>{Math.round(settings.zoomSensitivity * 100)}%</output></div></label>
+            <button className="settings-link" onClick={() => { applyDock(defaultLayout(focusedId ?? index.projects[0].id), true); toast('레이아웃을 기본값으로 되돌렸습니다.', 'success') }}><span><strong>레이아웃 초기화</strong><small>패널 배치와 크기를 처음 상태로</small></span><ChevronRight size={17} /></button>
             <button className="settings-link" onClick={() => setDialog({ kind: 'licenses' })}><span><strong>오픈소스 라이선스</strong><small>이 앱이 포함한 소프트웨어의 저작권과 라이선스 원문</small></span><ChevronRight size={17} /></button>
           </div>}
           {dialog.kind === 'export' && <div className="export-view">
