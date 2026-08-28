@@ -12,12 +12,16 @@ export interface CameraState {
 export interface ViewerHandle {
   /** 렌더 이미지가 지금 보는 각도를 그대로 쓰도록 카메라를 넘겨준다 */
   getCamera: () => CameraState | null
+  /** 모델이 화면에 꽉 차도록 다시 맞춘다 */
+  fit: () => void
 }
 
 interface Props {
   geometries: unknown[]
   showGrid: boolean
   showDimensions: boolean
+  /** 코드를 다시 실행할 때마다 모델에 화면을 맞출지. 꺼도 첫 실행에는 한 번 맞춘다 */
+  autoFit: boolean
   rotateSensitivity: number
   zoomSensitivity: number
   onInteractionHint?: () => void
@@ -32,6 +36,13 @@ const WHEEL_STEP = 0.34
 const PINCH_GAIN = 2.85
 
 const distanceBetween = (a: Vector, b: Vector) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+const fitToSolids = (runtime: any, solids: unknown[]) => {
+  if (!runtime || !solids.length) return
+  const fit = runtime.orbit.zoomToFit({ controls: runtime.controls, camera: runtime.camera, entities: solids })
+  Object.assign(runtime.controls, fit.controls)
+  Object.assign(runtime.camera, fit.camera)
+}
 
 // 열 우선 4x4 곱셈. 치수 라벨을 화면 좌표로 옮길 때만 쓴다
 const mat4multiply = (a: ArrayLike<number>, b: ArrayLike<number>) => {
@@ -60,12 +71,15 @@ const wheelNotches = (event: WheelEvent) => {
   return Math.max(-4, Math.min(4, (event.deltaY * unit) / 100))
 }
 
-export function Viewer({ geometries, showGrid, showDimensions, rotateSensitivity, zoomSensitivity, onInteractionHint, apiRef }: Props) {
+export function Viewer({ geometries, showGrid, showDimensions, autoFit, rotateSensitivity, zoomSensitivity, onInteractionHint, apiRef }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const runtimeRef = useRef<any>(null)
   const pointersRef = useRef(new Map<number, Point>())
   const previousPinchRef = useRef<{ distance: number; center: Point } | null>(null)
   const boundsRef = useRef<Bounds | null>(null)
+  // 자동 맞춤을 꺼 두면 보던 각도를 유지한다. 첫 실행만 예외로 한 번 맞춘다
+  const fittedRef = useRef(false)
+  const solidsRef = useRef<unknown[]>([])
   const labelRefs = useRef<(HTMLSpanElement | null)[]>([])
   const readoutRef = useRef<HTMLDivElement>(null)
 
@@ -168,6 +182,7 @@ export function Viewer({ geometries, showGrid, showDimensions, rotateSensitivity
           up: [...camera.up],
           fov: camera.fov,
         }),
+        fit: () => fitToSolids(runtimeRef.current, solidsRef.current),
       }
     }
 
@@ -205,12 +220,12 @@ export function Viewer({ geometries, showGrid, showDimensions, rotateSensitivity
       })
     }
     options.entities = [...guides, ...solids]
-    if (solids.length) {
-      const fit = orbit.zoomToFit({ controls, camera, entities: solids })
-      Object.assign(controls, fit.controls)
-      Object.assign(camera, fit.camera)
+    solidsRef.current = solids
+    if (solids.length && (autoFit || !fittedRef.current)) {
+      fittedRef.current = true
+      fitToSolids(runtime, solids)
     }
-  }, [geometries, showGrid, showDimensions])
+  }, [geometries, showGrid, showDimensions, autoFit])
 
   const rotateBy = (dx: number, dy: number) => {
     const runtime = runtimeRef.current

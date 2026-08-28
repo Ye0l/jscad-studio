@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import {
   Box, Braces, Camera, ChevronRight, Cloud, Code2, Download, Eye, FolderOpen, Grid3X3, LayoutGrid,
-  Play, Plus, Ruler, Save, Settings, Terminal, Trash2, X,
+  Maximize2, Play, Plus, Ruler, Save, Settings, Terminal, Trash2, X,
 } from 'lucide-react'
 import { CodeEditor, type CodeEditorHandle } from './components/CodeEditor'
 import { ContextMenu, type MenuItem } from './components/ContextMenu'
@@ -580,6 +580,7 @@ export function App() {
           geometries={target.geometries}
           showGrid={showGrid}
           showDimensions={showDimensions}
+          autoFit={settings.autoFit}
           rotateSensitivity={settings.rotateSensitivity}
           zoomSensitivity={settings.zoomSensitivity}
           apiRef={viewerRefFor(projectId)}
@@ -598,6 +599,9 @@ export function App() {
     if (kind === 'preview') {
       return (
         <>
+          <button className="icon-button tiny" onClick={() => focusedId && viewerApis.current.get(focusedId)?.current?.fit()} aria-label="화면에 맞추기" title="화면에 맞추기">
+            <Maximize2 size={16} />
+          </button>
           <button className={`icon-button tiny${showDimensions ? ' selected' : ''}`} onClick={() => setShowDimensions((value) => !value)} aria-label="치수 표시" title="치수 표시">
             <Ruler size={16} />
           </button>
@@ -701,6 +705,7 @@ export function App() {
             <Toggle checked={settings.motion} onChange={(motion) => updateSettings({ motion })} label="모션과 전환" description="패널, 모달, 토스트가 짧게 이어지도록 표시" />
             <Toggle checked={settings.autoRun} onChange={(autoRun) => updateSettings({ autoRun })} label="코드 자동 실행" description="입력이 멈춘 뒤 0.5초 후 미리보기 갱신" />
             <Toggle checked={settings.autoSave} onChange={(autoSave) => updateSettings({ autoSave })} label="프로젝트 자동 저장" description="변경 내용을 앱 내부 저장소에 자동 보관" />
+            <Toggle checked={settings.autoFit} onChange={(autoFit) => updateSettings({ autoFit })} label="실행할 때 화면 맞추기" description="끄면 코드를 다시 실행해도 보던 각도와 확대를 그대로 둡니다" />
             <label className="font-setting"><span><strong>UI 배율</strong><small>버튼과 패널을 화면에 맞게 확대·축소</small></span><div><input type="range" min="0.85" max="1.3" step="0.05" value={settings.uiScale} onChange={(e) => updateSettings({ uiScale: Number(e.target.value) })} /><output>{Math.round(settings.uiScale * 100)}%</output></div></label>
             <label className="font-setting"><span><strong>편집기 글자 크기</strong><small>물리 키보드 사용 시 가독성 조절</small></span><div><input type="range" min="12" max="22" value={settings.fontSize} onChange={(e) => updateSettings({ fontSize: Number(e.target.value) })} /><output>{settings.fontSize}px</output></div></label>
             <label className="font-setting"><span><strong>3D 회전 감도</strong><small>마우스와 한 손가락 드래그의 회전 속도</small></span><div><input type="range" min="0.1" max="1.2" step="0.05" value={settings.rotateSensitivity} onChange={(e) => updateSettings({ rotateSensitivity: Number(e.target.value) })} /><output>{Math.round(settings.rotateSensitivity * 100)}%</output></div></label>

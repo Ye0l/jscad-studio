@@ -22,6 +22,8 @@ export interface AppSettings {
   uiScale: number
   rotateSensitivity: number
   zoomSensitivity: number
+  /** 코드를 다시 실행할 때 미리보기 카메라를 모델에 맞출지 */
+  autoFit: boolean
   /** 도크 레이아웃. 처음 실행이거나 저장본이 깨졌으면 null */
   dock: DockNode | null
   /** GitHub 연동 설정. 연결 전에는 null */
