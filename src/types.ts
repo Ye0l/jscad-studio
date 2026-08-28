@@ -49,4 +49,5 @@ export type DialogState =
   | { kind: 'licenses' }
   | { kind: 'export' }
   | { kind: 'git' }
+  | { kind: 'render' }
   | null

@@ -1,12 +1,27 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, type RefObject } from 'react'
 import * as rendererModule from '@jscad/regl-renderer'
+import { boundsOf, boxWireframe, dimensionAnchors, type Bounds } from '../geometryBounds'
+
+export interface CameraState {
+  position: number[]
+  target: number[]
+  up: number[]
+  fov: number
+}
+
+export interface ViewerHandle {
+  /** 렌더 이미지가 지금 보는 각도를 그대로 쓰도록 카메라를 넘겨준다 */
+  getCamera: () => CameraState | null
+}
 
 interface Props {
   geometries: unknown[]
   showGrid: boolean
+  showDimensions: boolean
   rotateSensitivity: number
   zoomSensitivity: number
   onInteractionHint?: () => void
+  apiRef?: RefObject<ViewerHandle | null>
 }
 
 type Point = { x: number; y: number }
@@ -18,17 +33,41 @@ const PINCH_GAIN = 2.85
 
 const distanceBetween = (a: Vector, b: Vector) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2])
 
+// 열 우선 4x4 곱셈. 치수 라벨을 화면 좌표로 옮길 때만 쓴다
+const mat4multiply = (a: ArrayLike<number>, b: ArrayLike<number>) => {
+  const out = new Float64Array(16)
+  for (let col = 0; col < 4; col += 1) {
+    for (let row = 0; row < 4; row += 1) {
+      let sum = 0
+      for (let step = 0; step < 4; step += 1) sum += a[step * 4 + row] * b[col * 4 + step]
+      out[col * 4 + row] = sum
+    }
+  }
+  return out
+}
+
+/** 월드 좌표를 정규화 장치 좌표로. w 가 0 이하면 카메라 뒤라 그리지 않는다 */
+const project = (matrix: ArrayLike<number>, point: number[]) => {
+  const x = matrix[0] * point[0] + matrix[4] * point[1] + matrix[8] * point[2] + matrix[12]
+  const y = matrix[1] * point[0] + matrix[5] * point[1] + matrix[9] * point[2] + matrix[13]
+  const w = matrix[3] * point[0] + matrix[7] * point[1] + matrix[11] * point[2] + matrix[15]
+  return [w ? x / w : 0, w ? y / w : 0, w]
+}
+
 // 휠 한 칸을 1로 환산한다 (브라우저·기기마다 deltaY 단위가 달라서 정규화가 필요)
 const wheelNotches = (event: WheelEvent) => {
   const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 400 : 1
   return Math.max(-4, Math.min(4, (event.deltaY * unit) / 100))
 }
 
-export function Viewer({ geometries, showGrid, rotateSensitivity, zoomSensitivity, onInteractionHint }: Props) {
+export function Viewer({ geometries, showGrid, showDimensions, rotateSensitivity, zoomSensitivity, onInteractionHint, apiRef }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const runtimeRef = useRef<any>(null)
   const pointersRef = useRef(new Map<number, Point>())
   const previousPinchRef = useRef<{ distance: number; center: Point } | null>(null)
+  const boundsRef = useRef<Bounds | null>(null)
+  const labelRefs = useRef<(HTMLSpanElement | null)[]>([])
+  const readoutRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const host = hostRef.current
@@ -84,6 +123,29 @@ export function Viewer({ geometries, showGrid, rotateSensitivity, zoomSensitivit
       cameraApi.setProjection(camera, camera, viewport)
     }
 
+    // 화면 좌표로 옮겨 라벨 div 를 직접 움직인다
+    const placeLabels = (view: any, size: { width: number; height: number }) => {
+      const bounds = boundsRef.current
+      const labels = labelRefs.current
+      if (!bounds || !labels.length) return
+      const matrix = mat4multiply(view.projection, view.view)
+      dimensionAnchors(bounds).forEach((anchor, index) => {
+        const element = labels[index]
+        if (!element) return
+        const [x, y, w] = project(matrix, anchor.point)
+        if (w <= 0) {
+          element.style.opacity = '0'
+          return
+        }
+        element.style.opacity = '1'
+        element.style.transform = `translate(-50%, -50%) translate(${(x * 0.5 + 0.5) * size.width}px, ${(0.5 - y * 0.5) * size.height}px)`
+        element.textContent = `${anchor.value.toFixed(anchor.value < 10 ? 2 : 1)}`
+      })
+      if (readoutRef.current) {
+        readoutRef.current.textContent = bounds.size.map((value) => value.toFixed(1)).join(' × ') + ' mm'
+      }
+    }
+
     let frame = 0
     const animate = () => {
       const update = orbit.update({ controls, camera })
@@ -93,15 +155,27 @@ export function Viewer({ geometries, showGrid, rotateSensitivity, zoomSensitivit
       syncPlanes()
       options.camera = camera
       render(options)
+      placeLabels(camera, viewport)
       frame = requestAnimationFrame(animate)
     }
     frame = requestAnimationFrame(animate)
     runtimeRef.current = { renderer, cameraApi, orbit, camera, controls, options, render }
+    if (apiRef) {
+      apiRef.current = {
+        getCamera: () => ({
+          position: [...camera.position],
+          target: [...camera.target],
+          up: [...camera.up],
+          fov: camera.fov,
+        }),
+      }
+    }
 
     return () => {
       cancelAnimationFrame(frame)
       observer.disconnect()
       runtimeRef.current = null
+      if (apiRef) apiRef.current = null
       host.replaceChildren()
     }
   }, [])
@@ -111,17 +185,32 @@ export function Viewer({ geometries, showGrid, rotateSensitivity, zoomSensitivit
     if (!runtime) return
     const { renderer, orbit, camera, controls, options } = runtime
     const solids = renderer.entitiesFromSolids({ color: [0.27, 0.78, 0.68, 1] }, geometries)
-    const guides = [
+    const bounds = boundsOf(geometries)
+    boundsRef.current = bounds
+    const guides: unknown[] = [
       { visuals: { drawCmd: 'drawGrid', show: showGrid }, size: [400, 400], ticks: [10, 2] },
       { visuals: { drawCmd: 'drawAxis', show: showGrid }, size: 120 },
     ]
+    if (bounds) {
+      const positions = boxWireframe(bounds)
+      guides.push({
+        visuals: { drawCmd: 'drawLines', show: showDimensions, transparent: true },
+        // drawLines 는 normal 을 요구하고, 정점 수는 indices 에서만 읽는다
+        geometry: {
+          positions,
+          normals: positions.map(() => [0, 0, 1]),
+          indices: positions.map((_, index) => index),
+        },
+        color: [0.42, 0.62, 0.78, 0.85],
+      })
+    }
     options.entities = [...guides, ...solids]
     if (solids.length) {
       const fit = orbit.zoomToFit({ controls, camera, entities: solids })
       Object.assign(controls, fit.controls)
       Object.assign(camera, fit.camera)
     }
-  }, [geometries, showGrid])
+  }, [geometries, showGrid, showDimensions])
 
   const rotateBy = (dx: number, dy: number) => {
     const runtime = runtimeRef.current
@@ -179,6 +268,7 @@ export function Viewer({ geometries, showGrid, rotateSensitivity, zoomSensitivit
   }, [zoomSensitivity, onInteractionHint])
 
   return (
+    <div className="viewer-root">
     <div
       ref={hostRef}
       className="viewer-canvas"
@@ -225,5 +315,18 @@ export function Viewer({ geometries, showGrid, rotateSensitivity, zoomSensitivit
         previousPinchRef.current = null
       }}
     />
+      {showDimensions && (
+        <div className="dimension-layer" aria-hidden>
+          {['x', 'y', 'z'].map((axis, index) => (
+            <span
+              key={axis}
+              className={`dimension-label ${axis}`}
+              ref={(element) => { labelRefs.current[index] = element }}
+            />
+          ))}
+        </div>
+      )}
+      {showDimensions && <div className="dimension-readout" ref={readoutRef} />}
+    </div>
   )
 }
