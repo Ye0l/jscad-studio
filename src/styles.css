@@ -150,6 +150,30 @@ kbd { padding: 2px 5px; border: 1px solid #353b46; border-bottom-color: #4b5360;
 .panel-divider--y::before { left: 0; right: 0; top: 50%; height: 1px; transform: translateY(-50%); }
 .panel-divider--y::after { inset: -5px 0; }
 
+/* GitHub 연동 */
+.git-form .field-row { display: flex; align-items: center; gap: 6px; }
+.git-form .field-row input { flex: 1; }
+.field-pair { display: flex; gap: 9px; }
+.field-pair .field { flex: 1; }
+.git-view { display: flex; flex-direction: column; gap: 11px; }
+.git-repo { padding: 10px 12px; display: flex; align-items: center; gap: 12px; border: 1px solid #272c35; border-radius: 9px; background: #14171c; }
+.git-repo > div { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.git-repo strong { font-size: 12px; }
+.git-repo small { color: var(--muted); font: 10px 'JetBrains Mono', monospace; }
+.git-actions { display: flex; align-items: center; gap: 8px; }
+.git-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; max-height: 40vh; overflow: auto; }
+.git-item { padding: 8px 10px; display: flex; align-items: center; gap: 10px; border: 1px solid #242932; border-radius: 8px; background: #14171c; }
+.git-item.same { opacity: .62; }
+.git-item-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.git-item-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.git-item-copy small { color: #6f7782; font: 10px 'JetBrains Mono', monospace; }
+.git-item-actions { display: flex; gap: 2px; }
+.git-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border-radius: 999px; font-size: 10px; font-weight: 600; white-space: nowrap; }
+.git-badge.same { color: #7f8896; background: #1c2027; }
+.git-badge.onlyLocal { color: #8ee0cd; background: rgba(82, 203, 181, .14); }
+.git-badge.onlyRemote { color: #9db6ff; background: rgba(110, 145, 255, .14); }
+.git-badge.changed { color: #e8b866; background: rgba(232, 170, 85, .14); }
+
 /* 내보내기 화면 */
 .export-view { display: flex; flex-direction: column; gap: 10px; }
 .model-facts { margin: 0; display: flex; gap: 9px; }

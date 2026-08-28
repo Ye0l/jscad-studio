@@ -17,6 +17,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   rotateSensitivity: 0.3,
   zoomSensitivity: 0.35,
   dock: null,
+  git: null,
 }
 
 const browserLoad = (): { index: ProjectIndex; files: Record<string, string> } | null => {
