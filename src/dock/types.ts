@@ -1,6 +1,9 @@
-export type ViewKind = 'projects' | 'shapes' | 'console' | 'editor' | 'preview'
+export type ViewKind =
+  | 'projects' | 'shapes' | 'console'
+  | 'objects' | 'inspector' | 'stack'
+  | 'editor' | 'preview'
 
-/** 'projects' | 'shapes' | 'console' | 'editor:<projectId>' | 'preview:<projectId>' */
+/** 'projects' | 'objects' | … | 'editor:<projectId>' | 'preview:<projectId>' */
 export type TabId = string
 
 export interface DockGroup {

@@ -1,12 +1,45 @@
+import { addNode, emptyScene, makePrimitive, patchNode } from './scene/model'
+import { sceneToCode } from './scene/codegen'
+import { solveScene } from './scene/layout'
+import { composeDocument } from './scene/document'
 import type { ProjectTemplate } from './types'
 
 export const TEMPLATE_LABELS: Record<ProjectTemplate, string> = {
+  visual: '시각 모드 시작',
   blank: '빈 프로젝트',
   keycap: '키캡 예제',
   plate: '60% 보강판 예제',
 }
 
+/** 객체 트리로 바로 시작하는 프로젝트. 손잡이는 바닥판 윗면에 붙여 두어 상대 배치를 보여 준다 */
+const visualStarter = () => {
+  let scene = emptyScene()
+  const plate = makePrimitive(scene, 'cuboid', { width: 60, depth: 40, height: 4 })
+  plate.name = '바닥판'
+  plate.transform.position = [0, 0, 2]
+  scene = addNode(scene, plate)
+
+  const knob = makePrimitive(scene, 'cylinder', { radius: 8, height: 10, segments: 48 })
+  knob.name = '손잡이'
+  scene = addNode(scene, knob)
+  scene = patchNode(scene, knob.id, {
+    anchor: {
+      target: plate.id,
+      axes: {
+        x: { target: 'center', self: 'center' },
+        y: { target: 'center', self: 'center' },
+        z: { target: 'max', self: 'min' },
+      },
+      offset: [0, 0, 0],
+    },
+  })
+  return composeDocument(sceneToCode(scene, solveScene(scene)), scene)
+}
+
 export const TEMPLATES: Record<ProjectTemplate, string> = {
+  get visual() {
+    return visualStarter()
+  },
   blank: `const { cuboid, cylinder } = require('@jscad/modeling').primitives
 const { subtract } = require('@jscad/modeling').booleans
 

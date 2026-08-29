@@ -14,8 +14,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
   autoSave: true,
   fontSize: 15,
   uiScale: 1,
-  rotateSensitivity: 0.3,
-  zoomSensitivity: 0.35,
+  rotateSensitivity: 0.34,
+  zoomSensitivity: 0.3,
+  invertOrbitX: false,
+  gizmo: true,
   dock: null,
   git: null,
 }

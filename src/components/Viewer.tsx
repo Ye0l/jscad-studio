@@ -1,20 +1,65 @@
 import { useEffect, useRef } from 'react'
 import * as rendererModule from '@jscad/regl-renderer'
+import type { Box, Vec3 } from '../scene/types'
+
+export type GizmoMode = 'move' | 'rotate' | 'scale'
+
+/** 기즈모를 끌 때 나오는 값. 언제나 “끌기 시작한 순간부터의 총 변화량”이다 */
+export type GizmoPayload =
+  | { mode: 'move'; delta: Vec3 }
+  | { mode: 'rotate'; axis: number; degrees: number }
+  | { mode: 'scale'; axis: number; distance: number }
 
 interface Props {
   geometries: unknown[]
+  /** 고른 객체의 형상. 다른 색으로 그린다 */
+  highlighted?: unknown[]
+  /** 고른 객체를 감싸는 상자 */
+  selectionBox?: Box | null
   showGrid: boolean
+  /** 새 객체가 놓이는 작업면 높이 */
+  workplaneOffset?: number
   rotateSensitivity: number
   zoomSensitivity: number
+  /** 가로 회전 방향 뒤집기 */
+  invertOrbitX?: boolean
+  /** 값이 바뀌면 모델이 화면에 꽉 차도록 다시 맞춘다 */
+  fitToken?: number
+  /** 기즈모를 그릴 자리. null 이면 그리지 않는다 */
+  gizmoOrigin?: Vec3 | null
+  gizmoMode?: GizmoMode
+  /** 상대 배치·적층이 정하고 있어 직접 끌 수 없는 축 */
+  gizmoLockedAxes?: boolean[]
+  onGizmoStart?: () => void
+  onGizmoMove?: (payload: GizmoPayload) => void
+  onGizmoEnd?: () => void
+  /** 뷰포트를 탭했을 때 그 자리로 나가는 광선. 무엇을 고를지는 바깥에서 정한다 */
+  onPick?: (ray: { origin: Vec3; direction: Vec3 }) => void
   onInteractionHint?: () => void
 }
+
+const AXIS_COLORS = ['#ff6f7a', '#7ee08a', '#7fb4ff']
+const AXIS_NAMES = ['X', 'Y', 'Z']
+/** 화면에서 기즈모 손잡이까지의 길이 (px). 카메라 거리와 상관없이 일정하게 보인다 */
+const HANDLE_PX = 74
+const RING_PX = 54
 
 type Point = { x: number; y: number }
 type Vector = ArrayLike<number>
 
-// 감도 기본값(0.35)에서 휠 한 칸이 약 12% 줌, 핀치는 손가락 간격 변화와 1:1이 되도록 맞춘 계수
-const WHEEL_STEP = 0.34
-const PINCH_GAIN = 2.85
+// 감도 1.0 에서 화면 1px 이 도는 각도. 기본값(0.34)에서 약 0.3°/px 가 되도록 맞췄다
+const ROTATE_STEP = 0.0155
+// 휠 한 칸이 감도 1.0 에서 약 30% 줌
+const WHEEL_STEP = 0.3
+// 핀치는 손가락 간격과 1:1 로 붙어야 손에 익는다. 한 번에 튀는 값만 잘라 낸다
+const PINCH_CLAMP = { min: 0.8, max: 1.25 }
+
+const SOLID_COLOR = [0.27, 0.78, 0.68, 1]
+const SELECTED_COLOR = [1, 0.72, 0.29, 1]
+const BOX_COLOR = [1, 0.72, 0.29, 0.9]
+const PLANE_COLOR = [0.42, 0.58, 0.72, 0.55]
+const GRID_COLOR = [0.42, 0.47, 0.56, 0.4]
+const GRID_SUB_COLOR = [0.35, 0.4, 0.48, 0.16]
 
 const distanceBetween = (a: Vector, b: Vector) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2])
 
@@ -24,15 +69,72 @@ const wheelNotches = (event: WheelEvent) => {
   return Math.max(-4, Math.min(4, (event.deltaY * unit) / 100))
 }
 
-export function Viewer({ geometries, showGrid, rotateSensitivity, zoomSensitivity, onInteractionHint }: Props) {
+/**
+ * 한 변이 1 인 상자의 12 모서리. 실제 크기는 model 행렬로만 바꾸므로 버퍼를 다시 만들지 않는다.
+ * drawLines 의 셰이더가 normal 을 요구하므로 쓰이지 않더라도 같은 개수만큼 채워 준다.
+ */
+const unitBoxLines = () => {
+  const corner = (index: number) => [
+    (index & 1 ? 0.5 : -0.5), (index & 2 ? 0.5 : -0.5), (index & 4 ? 0.5 : -0.5),
+  ]
+  const edges = [
+    [0, 1], [1, 3], [3, 2], [2, 0],
+    [4, 5], [5, 7], [7, 6], [6, 4],
+    [0, 4], [1, 5], [2, 6], [3, 7],
+  ]
+  const positions = edges.flatMap(([a, b]) => [corner(a), corner(b)])
+  // indices 가 있어야 regl 이 그릴 정점 개수를 알 수 있다
+  return { positions, normals: positions.map(() => [0, 0, 1]), indices: positions.map((_, index) => index) }
+}
+
+/** 열 우선 4x4: 가운데로 옮기고 크기를 준다 */
+const boxMatrix = (center: number[], size: number[]) => [
+  size[0], 0, 0, 0,
+  0, size[1], 0, 0,
+  0, 0, size[2], 0,
+  center[0], center[1], center[2], 1,
+]
+
+export function Viewer({
+  geometries, highlighted, selectionBox, showGrid, workplaneOffset = 0,
+  rotateSensitivity, zoomSensitivity, invertOrbitX = false, fitToken = 0,
+  gizmoOrigin = null, gizmoMode = 'move', gizmoLockedAxes, onGizmoStart, onGizmoMove, onGizmoEnd,
+  onPick, onInteractionHint,
+}: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const runtimeRef = useRef<any>(null)
   const pointersRef = useRef(new Map<number, Point>())
   const previousPinchRef = useRef<{ distance: number; center: Point } | null>(null)
+  // 두 손가락 제스처가 끝난 직후 남은 손가락으로 화면이 홱 도는 것을 막는다
+  const gestureRef = useRef(false)
+  // 탭인지 끌기인지 가리기 위해 누른 자리와 움직인 거리를 기억한다
+  const tapRef = useRef<{ x: number; y: number; moved: boolean } | null>(null)
+  const fittedRef = useRef({ token: -1, count: 0 })
+  const svgRef = useRef<SVGSVGElement>(null)
+  const projectRef = useRef<((point: Vec3) => Point | null) | null>(null)
+  const gizmoRef = useRef<{ origin: Vec3 | null; mode: GizmoMode; locked: boolean[] }>(
+    { origin: null, mode: 'move', locked: [] },
+  )
+  const gizmoDragRef = useRef<{
+    axis: number
+    kind: 'axis' | 'view' | 'ring'
+    start: Point
+    origin: Vec3
+    /** 화면에서의 축 방향(단위 벡터)과, 화면 1px 이 뜻하는 실제 거리 */
+    dir: Point
+    worldPerPixel: number
+    startAngle: number
+    sign: number
+    right: Vec3
+    up: Vec3
+  } | null>(null)
+  gizmoRef.current = { origin: gizmoOrigin, mode: gizmoMode, locked: gizmoLockedAxes ?? [] }
 
   useEffect(() => {
     const host = hostRef.current
     if (!host) return
+    // 렌더러가 새로 만들어지면 카메라도 처음 상태이므로 화면 맞춤 기록을 지운다
+    fittedRef.current = { token: -1, count: 0 }
     const renderer = rendererModule as any
     const cameraApi = renderer.cameras.perspective
     const orbit = renderer.controls.orbit
@@ -44,10 +146,25 @@ export function Viewer({ geometries, showGrid, rotateSensitivity, zoomSensitivit
     }
     const controls = {
       ...orbit.defaults,
+      // 관성을 끄면 끈 만큼만 돌아간다 (기본값은 끌던 힘이 남아 과하게 돈다)
+      drag: 1,
       limits: { ...orbit.defaults.limits },
       zoomToFit: { ...orbit.defaults.zoomToFit },
       userControl: { ...orbit.defaults.userControl },
       autoRotate: { ...orbit.defaults.autoRotate },
+    }
+    // 선택 상자와 작업면은 한 번만 만들고 행렬만 바꿔 그린다 (매번 만들면 GPU 버퍼가 쌓인다)
+    const selection = {
+      visuals: { drawCmd: 'drawLines', show: false },
+      geometry: unitBoxLines(),
+      color: BOX_COLOR,
+      model: boxMatrix([0, 0, 0], [1, 1, 1]),
+    }
+    const plane = {
+      visuals: { drawCmd: 'drawLines', show: false },
+      geometry: unitBoxLines(),
+      color: PLANE_COLOR,
+      model: boxMatrix([0, 0, 0], [1, 1, 0]),
     }
     const options: any = {
       glOptions: { container: host, attributes: { antialias: true, alpha: false } },
@@ -66,6 +183,8 @@ export function Viewer({ geometries, showGrid, rotateSensitivity, zoomSensitivit
     const resize = () => {
       const rect = host.getBoundingClientRect()
       viewport = { width: Math.max(1, rect.width), height: Math.max(1, rect.height) }
+      // 기즈모 SVG 도 같은 좌표계를 쓰도록 맞춘다 (UI 배율이 걸려 있어도 어긋나지 않는다)
+      svgRef.current?.setAttribute('viewBox', `0 0 ${viewport.width} ${viewport.height}`)
       cameraApi.setProjection(camera, camera, viewport)
       cameraApi.update(camera, camera)
     }
@@ -84,6 +203,75 @@ export function Viewer({ geometries, showGrid, rotateSensitivity, zoomSensitivit
       cameraApi.setProjection(camera, camera, viewport)
     }
 
+    /** 월드 좌표를 화면 좌표(px)로. 카메라 뒤에 있으면 null */
+    const project = (point: Vec3): Point | null => {
+      const { view, projection } = camera
+      const apply = (matrix: number[], input: number[]) => [0, 1, 2, 3].map((row) =>
+        matrix[row] * input[0] + matrix[4 + row] * input[1] + matrix[8 + row] * input[2] + matrix[12 + row] * input[3])
+      const eye = apply(view, [point[0], point[1], point[2], 1])
+      const clip = apply(projection, eye)
+      if (!(clip[3] > 1e-6)) return null
+      return {
+        x: (clip[0] / clip[3] * 0.5 + 0.5) * viewport.width,
+        y: (0.5 - clip[1] / clip[3] * 0.5) * viewport.height,
+      }
+    }
+    projectRef.current = project
+
+    // 기즈모는 SVG 로 덮어 그린다. 프레임마다 좌표만 갈아 끼워 다시 렌더링하지 않는다
+    const paintGizmo = () => {
+      const svg = svgRef.current
+      if (!svg) return
+      const { origin, mode, locked } = gizmoRef.current
+      const at = origin ? project(origin) : null
+      if (!at) {
+        svg.style.display = 'none'
+        return
+      }
+      svg.style.display = ''
+      const center = svg.querySelector<SVGCircleElement>('[data-gizmo-center]')
+      center?.setAttribute('cx', String(at.x))
+      center?.setAttribute('cy', String(at.y))
+      for (let axis = 0; axis < 3; axis += 1) {
+        const step: Vec3 = [origin![0], origin![1], origin![2]]
+        step[axis] += 1
+        const tip = project(step)
+        const group = svg.querySelector<SVGGElement>(`[data-gizmo-axis="${axis}"]`)
+        if (!group) continue
+        // 상대 배치가 정하고 있는 축은 끌어도 소용이 없으니 아예 보여 주지 않는다
+        if (mode === 'move' && locked[axis]) {
+          group.style.display = 'none'
+          continue
+        }
+        const dx = tip ? tip.x - at.x : 0
+        const dy = tip ? tip.y - at.y : 0
+        const length = Math.hypot(dx, dy)
+        // 축이 카메라를 정면으로 향하면 화면에서 점이 되므로 감춘다
+        if (!tip || length < 0.02) {
+          group.style.display = 'none'
+          continue
+        }
+        group.style.display = ''
+        const unit = { x: dx / length, y: dy / length }
+        const reach = mode === 'rotate' ? RING_PX : HANDLE_PX
+        const end = { x: at.x + unit.x * reach, y: at.y + unit.y * reach }
+        group.dataset.dirX = String(unit.x)
+        group.dataset.dirY = String(unit.y)
+        group.dataset.scale = String(1 / length)
+        const line = group.querySelector('line')
+        line?.setAttribute('x1', String(at.x))
+        line?.setAttribute('y1', String(at.y))
+        line?.setAttribute('x2', String(end.x))
+        line?.setAttribute('y2', String(end.y))
+        const knob = group.querySelector('[data-gizmo-knob]')
+        knob?.setAttribute('cx', String(end.x))
+        knob?.setAttribute('cy', String(end.y))
+        const label = group.querySelector('text')
+        label?.setAttribute('x', String(at.x + unit.x * (reach + 13)))
+        label?.setAttribute('y', String(at.y + unit.y * (reach + 13) + 4))
+      }
+    }
+
     let frame = 0
     const animate = () => {
       const update = orbit.update({ controls, camera })
@@ -93,10 +281,11 @@ export function Viewer({ geometries, showGrid, rotateSensitivity, zoomSensitivit
       syncPlanes()
       options.camera = camera
       render(options)
+      paintGizmo()
       frame = requestAnimationFrame(animate)
     }
     frame = requestAnimationFrame(animate)
-    runtimeRef.current = { renderer, cameraApi, orbit, camera, controls, options, render }
+    runtimeRef.current = { renderer, cameraApi, orbit, camera, controls, options, render, selection, plane, guides: null }
 
     return () => {
       cancelAnimationFrame(frame)
@@ -109,24 +298,74 @@ export function Viewer({ geometries, showGrid, rotateSensitivity, zoomSensitivit
   useEffect(() => {
     const runtime = runtimeRef.current
     if (!runtime) return
-    const { renderer, orbit, camera, controls, options } = runtime
-    const solids = renderer.entitiesFromSolids({ color: [0.27, 0.78, 0.68, 1] }, geometries)
+    const { renderer, options, selection, plane } = runtime
+    const solids = renderer.entitiesFromSolids({ color: SOLID_COLOR }, geometries)
+    // 형상 자체가 색을 들고 있으면 그 색이 이긴다. 고른 객체는 얕은 복사로 색만 덮어쓴다
+    const picked = renderer.entitiesFromSolids(
+      { color: SELECTED_COLOR },
+      (highlighted ?? []).map((item) => ({ ...(item as object), color: SELECTED_COLOR })),
+    )
     const guides = [
-      { visuals: { drawCmd: 'drawGrid', show: showGrid }, size: [400, 400], ticks: [10, 2] },
-      { visuals: { drawCmd: 'drawAxis', show: showGrid }, size: 120 },
+      {
+        visuals: { drawCmd: 'drawGrid', show: showGrid },
+        // 50mm 굵은 눈금 + 10mm 가는 눈금. 더 촘촘하면 확대했을 때 화면이 지저분해진다
+        size: [200, 200],
+        ticks: [50, 10],
+        color: GRID_COLOR,
+        subColor: GRID_SUB_COLOR,
+      },
+      { visuals: { drawCmd: 'drawAxis', show: showGrid }, size: 100 },
     ]
-    options.entities = [...guides, ...solids]
-    if (solids.length) {
-      const fit = orbit.zoomToFit({ controls, camera, entities: solids })
-      Object.assign(controls, fit.controls)
-      Object.assign(camera, fit.camera)
+    options.entities = [...guides, plane, selection, ...solids, ...picked]
+  }, [geometries, highlighted, showGrid])
+
+  // 선택 상자와 작업면은 행렬만 갈아 끼운다
+  useEffect(() => {
+    const runtime = runtimeRef.current
+    if (!runtime) return
+    const { selection } = runtime
+    if (!selectionBox) {
+      selection.visuals.show = false
+      return
     }
-  }, [geometries, showGrid])
+    const size = [0, 1, 2].map((axis) => Math.max(0.01, selectionBox.max[axis] - selectionBox.min[axis]))
+    const center = [0, 1, 2].map((axis) => (selectionBox.max[axis] + selectionBox.min[axis]) / 2)
+    selection.model = boxMatrix(center, size)
+    selection.visuals.show = true
+  }, [selectionBox])
+
+  useEffect(() => {
+    const runtime = runtimeRef.current
+    if (!runtime) return
+    runtime.plane.model = boxMatrix([0, 0, workplaneOffset], [400, 400, 0])
+    runtime.plane.visuals.show = showGrid && Math.abs(workplaneOffset) > 1e-6
+  }, [workplaneOffset, showGrid])
+
+  // 빈 화면에 모델이 처음 생겼을 때와 “화면 맞춤”을 눌렀을 때만 카메라를 옮긴다.
+  // 값을 고칠 때마다 카메라가 튀면 직접 조작이 불가능해진다.
+  useEffect(() => {
+    const runtime = runtimeRef.current
+    if (!runtime) return
+    const solids = [...geometries, ...(highlighted ?? [])]
+    const previousCount = fittedRef.current.count
+    fittedRef.current.count = solids.length
+    if (!solids.length) return
+    if (previousCount > 0 && fittedRef.current.token === fitToken) return
+    const entities = runtime.renderer.entitiesFromSolids({ color: SOLID_COLOR }, solids)
+    if (!entities.length) return
+    const fit = runtime.orbit.zoomToFit({ controls: runtime.controls, camera: runtime.camera, entities })
+    Object.assign(runtime.controls, fit.controls)
+    Object.assign(runtime.camera, fit.camera)
+    fittedRef.current = { token: fitToken, count: solids.length }
+    // 형상이 바뀔 때마다 카메라가 튀지 않도록 개수와 fitToken 만 본다
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fitToken, geometries.length, highlighted?.length])
 
   const rotateBy = (dx: number, dy: number) => {
     const runtime = runtimeRef.current
     if (!runtime) return
-    const angle = [dx * 0.008 * rotateSensitivity, -dy * 0.008 * rotateSensitivity]
+    const gain = ROTATE_STEP * rotateSensitivity
+    const angle = [(invertOrbitX ? -dx : dx) * gain, -dy * gain]
     const result = runtime.orbit.rotate({ controls: runtime.controls, camera: runtime.camera }, angle)
     Object.assign(runtime.controls, result.controls)
   }
@@ -178,7 +417,152 @@ export function Viewer({ geometries, showGrid, rotateSensitivity, zoomSensitivit
     return () => host.removeEventListener('wheel', onWheel)
   }, [zoomSensitivity, onInteractionHint])
 
+  /** 화면 한 점을 지나는 광선 (원근 카메라 기준) */
+  const rayAt = (point: Point) => {
+    const runtime = runtimeRef.current
+    const host = hostRef.current
+    if (!runtime || !host) return null
+    const rect = host.getBoundingClientRect()
+    const { camera } = runtime
+    const view = camera.view
+    const right: Vec3 = [view[0], view[4], view[8]]
+    const up: Vec3 = [view[1], view[5], view[9]]
+    const backward: Vec3 = [view[2], view[6], view[10]]
+    const ndcX = (point.x / Math.max(1, rect.width)) * 2 - 1
+    const ndcY = 1 - (point.y / Math.max(1, rect.height)) * 2
+    const tangent = Math.tan(camera.fov / 2)
+    const aspect = rect.width / Math.max(1, rect.height)
+    const direction = [0, 1, 2].map((index) => (
+      -backward[index] + right[index] * ndcX * tangent * aspect + up[index] * ndcY * tangent
+    )) as Vec3
+    const length = Math.hypot(...direction) || 1
+    return {
+      origin: [...camera.position] as Vec3,
+      direction: direction.map((value) => value / length) as Vec3,
+    }
+  }
+
+  const localPoint = (event: { clientX: number; clientY: number }): Point => {
+    const rect = hostRef.current?.getBoundingClientRect()
+    return { x: event.clientX - (rect?.left ?? 0), y: event.clientY - (rect?.top ?? 0) }
+  }
+
+  const startGizmo = (event: React.PointerEvent, axis: number, kind: 'axis' | 'view') => {
+    const runtime = runtimeRef.current
+    const origin = gizmoOrigin
+    if (!runtime || !origin) return
+    event.stopPropagation()
+    event.preventDefault();
+    (event.currentTarget as Element).setPointerCapture(event.pointerId)
+
+    const group = (event.currentTarget as Element).closest('[data-gizmo-axis]') as SVGGElement | null
+    const dir = { x: Number(group?.dataset.dirX ?? 1), y: Number(group?.dataset.dirY ?? 0) }
+    const worldPerPixel = Number(group?.dataset.scale ?? 1)
+    const start = localPoint(event)
+    const at = projectRef.current?.(origin) ?? start
+    const { camera } = runtime
+    const view = camera.view
+    const right: Vec3 = [view[0], view[4], view[8]]
+    const up: Vec3 = [view[1], view[5], view[9]]
+    // 화면 평면에서 끌 때 쓸 배율 — 대상이 놓인 깊이에서 1px 이 뜻하는 실제 거리
+    const depth = distanceBetween(camera.position, origin)
+    const planePerPixel = (2 * depth * Math.tan(camera.fov / 2)) / Math.max(1, camera.viewport?.[3] ?? 1)
+    const toCamera = [0, 1, 2].map((index) => camera.position[index] - origin[index])
+    const facing = toCamera[axis]
+
+    gizmoDragRef.current = {
+      axis,
+      kind: kind === 'view' ? 'view' : gizmoMode === 'rotate' ? 'ring' : 'axis',
+      start,
+      origin: [...origin] as Vec3,
+      dir,
+      worldPerPixel: kind === 'view' ? planePerPixel : worldPerPixel,
+      startAngle: Math.atan2(start.y - at.y, start.x - at.x),
+      sign: facing > 0 ? -1 : 1,
+      right,
+      up,
+    }
+    onGizmoStart?.()
+  }
+
+  const moveGizmo = (event: React.PointerEvent) => {
+    const drag = gizmoDragRef.current
+    if (!drag || !onGizmoMove) return
+    const point = localPoint(event)
+
+    if (drag.kind === 'view') {
+      const dx = (point.x - drag.start.x) * drag.worldPerPixel
+      const dy = (point.y - drag.start.y) * drag.worldPerPixel
+      const delta = [0, 1, 2].map((index) => drag.right[index] * dx - drag.up[index] * dy) as Vec3
+      onGizmoMove({ mode: 'move', delta })
+      return
+    }
+
+    if (drag.kind === 'ring') {
+      const at = projectRef.current?.(drag.origin)
+      if (!at) return
+      const angle = Math.atan2(point.y - at.y, point.x - at.x)
+      let turn = angle - drag.startAngle
+      while (turn > Math.PI) turn -= Math.PI * 2
+      while (turn < -Math.PI) turn += Math.PI * 2
+      onGizmoMove({ mode: 'rotate', axis: drag.axis, degrees: (turn * 180 / Math.PI) * drag.sign })
+      return
+    }
+
+    const along = (point.x - drag.start.x) * drag.dir.x + (point.y - drag.start.y) * drag.dir.y
+    const distance = along * drag.worldPerPixel
+    if (gizmoMode === 'scale') {
+      onGizmoMove({ mode: 'scale', axis: drag.axis, distance })
+      return
+    }
+    const delta: Vec3 = [0, 0, 0]
+    delta[drag.axis] = distance
+    onGizmoMove({ mode: 'move', delta })
+  }
+
+  const endGizmo = () => {
+    if (!gizmoDragRef.current) return
+    gizmoDragRef.current = null
+    onGizmoEnd?.()
+  }
+
+  const gizmoHandles = (
+    <svg
+      ref={svgRef}
+      className={`gizmo-layer mode-${gizmoMode}`}
+      preserveAspectRatio="none"
+      style={{ display: gizmoOrigin ? undefined : 'none' }}
+      onPointerMove={moveGizmo}
+      onPointerUp={endGizmo}
+      onPointerCancel={endGizmo}
+    >
+      {[0, 1, 2].map((axis) => (
+        <g key={axis} data-gizmo-axis={axis}>
+          <line stroke={AXIS_COLORS[axis]} strokeWidth={2} strokeLinecap="round" />
+          <circle
+            data-gizmo-knob
+            r={gizmoMode === 'scale' ? 6 : 7}
+            fill={AXIS_COLORS[axis]}
+            className="gizmo-knob"
+            onPointerDown={(event) => startGizmo(event, axis, 'axis')}
+          />
+          <text fill={AXIS_COLORS[axis]} textAnchor="middle" className="gizmo-label">{AXIS_NAMES[axis]}</text>
+        </g>
+      ))}
+      {gizmoMode === 'move' && (
+        <circle
+          data-gizmo-center
+          r={9}
+          className="gizmo-center"
+          onPointerDown={(event) => startGizmo(event, 0, 'view')}
+        />
+      )}
+    </svg>
+  )
+
+  // WebGL 캔버스는 regl 이 host 안에 직접 붙이므로, 기즈모 SVG 는 형제로 둔다
   return (
+    <div className="viewer-stage">
     <div
       ref={hostRef}
       className="viewer-canvas"
@@ -188,6 +572,8 @@ export function Viewer({ geometries, showGrid, rotateSensitivity, zoomSensitivit
       onPointerDown={(event) => {
         event.currentTarget.setPointerCapture(event.pointerId)
         pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY })
+        tapRef.current = pointersRef.current.size === 1 ? { x: event.clientX, y: event.clientY, moved: false } : null
+        if (pointersRef.current.size > 1) gestureRef.current = true
         onInteractionHint?.()
       }}
       onPointerMove={(event) => {
@@ -196,7 +582,11 @@ export function Viewer({ geometries, showGrid, rotateSensitivity, zoomSensitivit
         const pointers = pointersRef.current
         const current = { x: event.clientX, y: event.clientY }
         pointers.set(event.pointerId, current)
+        if (tapRef.current && Math.hypot(current.x - tapRef.current.x, current.y - tapRef.current.y) > 4) {
+          tapRef.current.moved = true
+        }
         if (pointers.size === 1) {
+          if (gestureRef.current) return
           const dx = current.x - previous.x
           const dy = current.y - previous.y
           const panning = event.shiftKey || (event.buttons & 2) !== 0 || (event.buttons & 4) !== 0
@@ -210,20 +600,31 @@ export function Viewer({ geometries, showGrid, rotateSensitivity, zoomSensitivit
         const previousPinch = previousPinchRef.current
         if (previousPinch) {
           panBy(center.x - previousPinch.center.x, center.y - previousPinch.center.y)
-          const rawRatio = previousPinch.distance / Math.max(distance, 1)
-          const gained = 1 + (rawRatio - 1) * zoomSensitivity * PINCH_GAIN
-          zoomBy(Math.min(1.6, Math.max(0.625, gained)))
+          const ratio = previousPinch.distance / Math.max(distance, 1)
+          zoomBy(Math.min(PINCH_CLAMP.max, Math.max(PINCH_CLAMP.min, ratio)))
         }
         previousPinchRef.current = { distance, center }
       }}
       onPointerUp={(event) => {
         pointersRef.current.delete(event.pointerId)
         if (pointersRef.current.size < 2) previousPinchRef.current = null
+        const tap = tapRef.current
+        tapRef.current = null
+        // 끌지 않고 그대로 뗐으면 그 자리에 있는 객체를 고른다
+        if (tap && !tap.moved && !gestureRef.current && onPick) {
+          const ray = rayAt(localPoint(event))
+          if (ray) onPick(ray)
+        }
+        if (!pointersRef.current.size) gestureRef.current = false
       }}
       onPointerCancel={(event) => {
         pointersRef.current.delete(event.pointerId)
         previousPinchRef.current = null
+        tapRef.current = null
+        if (!pointersRef.current.size) gestureRef.current = false
       }}
     />
+      {gizmoHandles}
+    </div>
   )
 }
