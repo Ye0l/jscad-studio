@@ -356,7 +356,14 @@ kbd { padding: 2px 5px; border: 1px solid #353b46; border-bottom-color: #4b5360;
 .anchor-axis { color: #6f7885; font-size: 10px; font-weight: 700; }
 .anchor-row .num-field .num-label { display: none; }
 .anchor-row select { padding: 0 4px; font-size: 10.5px; }
-.ins-code { width: 100%; min-height: 130px; padding: 8px; border: 1px solid #2b303a; border-radius: 8px; background: #0e1116; color: #cdd4dc; font: 10.5px/1.55 'JetBrains Mono', monospace; resize: vertical; outline: none; user-select: text; }
+.ins-code { width: 100%; height: 260px; min-height: 120px; overflow: hidden; border: 1px solid #2b303a; border-radius: 8px; background: #0e1116; resize: vertical; }
+.ins-code .code-editor, .ins-code .cm-editor { height: 100%; }
+.ins-code .cm-gutters, .ins-code .cm-editor { background: #0e1116 !important; }
+.ins-code:focus-within { border-color: var(--accent); }
+.ins-link svg { margin-right: 3px; vertical-align: -2px; }
+.code-node-dialog { display: flex; flex-direction: column; gap: 10px; }
+.code-node-editor { height: min(58vh, 520px); overflow: hidden; border: 1px solid #2b303a; border-radius: 9px; background: #0e1116; }
+.code-node-editor .code-editor, .code-node-editor .cm-editor { height: 100%; }
 .ins-facts { margin: 2px 0 0; display: flex; flex-direction: column; gap: 4px; padding-top: 9px; border-top: 1px solid #22262e; }
 .ins-facts > div { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .ins-facts dt { color: #6f7885; font-size: 10px; }
@@ -401,6 +408,7 @@ kbd { padding: 2px 5px; border: 1px solid #353b46; border-bottom-color: #4b5360;
 
 .modal-layer { position: fixed; inset: 0; z-index: 100; padding: max(18px, env(safe-area-inset-top)) max(18px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)) max(18px, env(safe-area-inset-left)); display: grid; place-items: center; background: rgba(3, 5, 8, .64); backdrop-filter: blur(5px); animation: layer-in 180ms var(--ease) both; }
 .modal { width: min(520px, 100%); max-height: 86vh; overflow: hidden; display: grid; grid-template-rows: auto minmax(0,1fr) auto; border: 1px solid #303641; border-radius: 14px; background: #171a20; box-shadow: var(--shadow); animation: modal-in 190ms var(--ease) both; }
+.modal.wide { width: min(880px, 100%); }
 .modal-layer.is-closing { animation: layer-out 170ms var(--ease) both; }
 .modal-layer.is-closing .modal { animation: modal-out 170ms var(--ease) both; }
 @keyframes layer-in { from { opacity: 0; } }

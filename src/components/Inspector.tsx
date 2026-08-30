@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
-import { Anchor as AnchorIcon, Link2Off, Move3d, RotateCw, Ruler, Scale3d } from 'lucide-react'
+import { Anchor as AnchorIcon, Link2Off, Maximize2, Move3d, RotateCw, Ruler, Scale3d } from 'lucide-react'
+import { CodeEditor } from './CodeEditor'
 import { PRIMITIVES } from '../scene/primitives'
 import { boxCenter, boxSize, round } from '../scene/mat'
 import { ancestorsOf, BOOLEAN_LABELS, NODE_TYPE_LABELS, setParam, setTransform, patchNode } from '../scene/model'
@@ -9,7 +10,11 @@ interface Props {
   scene: Scene
   layout: Layout
   selection: string[]
-  onScene: (next: Scene) => void
+  /** typing 이 true 면 코드를 치는 중이라 재계산을 서두르지 않는다 */
+  onScene: (next: Scene, options?: { typing?: boolean }) => void
+  fontSize?: number
+  /** 코드 객체를 큰 창에서 열고 싶을 때 */
+  onExpandCode?: () => void
   /** 값이 확정됐을 때(입력 끝) 알린다. 무거운 재계산을 미뤄 두는 데 쓴다 */
   onCommit?: () => void
 }
@@ -120,7 +125,7 @@ function VectorRow({
   )
 }
 
-export function Inspector({ scene, layout, selection, onScene, onCommit }: Props) {
+export function Inspector({ scene, layout, selection, onScene, onCommit, fontSize = 13, onExpandCode }: Props) {
   const id = selection[selection.length - 1]
   const node = id ? scene.nodes[id] : null
 
@@ -287,15 +292,20 @@ export function Inspector({ scene, layout, selection, onScene, onCommit }: Props
 
       {node.type === 'code' && (
         <div className="ins-block">
-          <div className="ins-block-head">코드</div>
-          <textarea
-            className="ins-code"
-            spellCheck={false}
-            value={node.code}
-            onChange={(event) => onScene(patchNode(scene, node.id, { code: event.target.value } as never))}
-            onBlur={onCommit}
-          />
-          <p className="muted-copy">module.exports = &#123; main &#125; 형태로 형상을 돌려주세요.</p>
+          <div className="ins-block-head">
+            코드
+            {onExpandCode && (
+              <button className="ins-link" onClick={onExpandCode}><Maximize2 size={12} />큰 창에서</button>
+            )}
+          </div>
+          <div className="ins-code">
+            <CodeEditor
+              value={node.code}
+              fontSize={fontSize}
+              onChange={(code) => onScene(patchNode(scene, node.id, { code } as never), { typing: true })}
+            />
+          </div>
+          <p className="muted-copy">module.exports = &#123; main &#125; 형태로 형상을 돌려주세요. 아래 모서리를 끌면 높이를 바꿀 수 있습니다.</p>
         </div>
       )}
 
