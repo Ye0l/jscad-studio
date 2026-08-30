@@ -61,8 +61,10 @@ interface Props {
 const AXIS_COLORS = ['#ff6f7a', '#7ee08a', '#7fb4ff']
 const AXIS_NAMES = ['X', 'Y', 'Z']
 /** 화면에서 기즈모 손잡이까지의 길이 (px). 카메라 거리와 상관없이 일정하게 보인다 */
-const HANDLE_PX = 74
-const RING_PX = 54
+const HANDLE_PX = 92
+const RING_PX = 68
+/** 손가락이 닿는 영역의 굵기 (px). 눈에 보이는 손잡이보다 훨씬 크게 잡는다 */
+const HIT_PX = 44
 
 type Point = { x: number; y: number }
 type Vector = ArrayLike<number>
@@ -315,9 +317,10 @@ export function Viewer({
         return
       }
       svg.style.display = ''
-      const center = svg.querySelector<SVGCircleElement>('[data-gizmo-center]')
-      center?.setAttribute('cx', String(at.x))
-      center?.setAttribute('cy', String(at.y))
+      for (const center of svg.querySelectorAll('[data-gizmo-center], [data-gizmo-center-hit]')) {
+        center.setAttribute('cx', String(at.x))
+        center.setAttribute('cy', String(at.y))
+      }
       for (let axis = 0; axis < 3; axis += 1) {
         const step: Vec3 = [origin![0], origin![1], origin![2]]
         step[axis] += 1
@@ -344,14 +347,16 @@ export function Viewer({
         group.dataset.dirX = String(unit.x)
         group.dataset.dirY = String(unit.y)
         group.dataset.scale = String(1 / length)
-        const line = group.querySelector('line')
-        line?.setAttribute('x1', String(at.x))
-        line?.setAttribute('y1', String(at.y))
-        line?.setAttribute('x2', String(end.x))
-        line?.setAttribute('y2', String(end.y))
-        const knob = group.querySelector('[data-gizmo-knob]')
-        knob?.setAttribute('cx', String(end.x))
-        knob?.setAttribute('cy', String(end.y))
+        for (const line of group.querySelectorAll('line')) {
+          line.setAttribute('x1', String(at.x))
+          line.setAttribute('y1', String(at.y))
+          line.setAttribute('x2', String(end.x))
+          line.setAttribute('y2', String(end.y))
+        }
+        for (const knob of group.querySelectorAll('circle')) {
+          knob.setAttribute('cx', String(end.x))
+          knob.setAttribute('cy', String(end.y))
+        }
         const label = group.querySelector('text')
         label?.setAttribute('x', String(at.x + unit.x * (reach + 13)))
         label?.setAttribute('y', String(at.y + unit.y * (reach + 13) + 4))
@@ -679,24 +684,24 @@ export function Viewer({
     >
       {[0, 1, 2].map((axis) => (
         <g key={axis} data-gizmo-axis={axis}>
-          <line stroke={AXIS_COLORS[axis]} strokeWidth={2} strokeLinecap="round" />
-          <circle
-            data-gizmo-knob
-            r={gizmoMode === 'scale' ? 6 : 7}
-            fill={AXIS_COLORS[axis]}
-            className="gizmo-knob"
-            onPointerDown={(event) => startGizmo(event, axis, 'axis')}
-          />
+          {/* 손가락으로도 잡히도록 축 전체와 손잡이 둘레에 넓은 영역을 깔아 둔다 */}
+          <line className="gizmo-hit" strokeWidth={HIT_PX} onPointerDown={(event) => startGizmo(event, axis, 'axis')} />
+          <line stroke={AXIS_COLORS[axis]} strokeWidth={2.5} strokeLinecap="round" />
+          <circle className="gizmo-hit" r={HIT_PX / 2} onPointerDown={(event) => startGizmo(event, axis, 'axis')} />
+          <circle data-gizmo-knob r={gizmoMode === 'scale' ? 7 : 8} fill={AXIS_COLORS[axis]} className="gizmo-knob" />
           <text fill={AXIS_COLORS[axis]} textAnchor="middle" className="gizmo-label">{AXIS_NAMES[axis]}</text>
         </g>
       ))}
       {gizmoMode === 'move' && (
-        <circle
-          data-gizmo-center
-          r={9}
-          className="gizmo-center"
-          onPointerDown={(event) => startGizmo(event, 0, 'view')}
-        />
+        <>
+          <circle
+            data-gizmo-center-hit
+            className="gizmo-hit"
+            r={HIT_PX / 2}
+            onPointerDown={(event) => startGizmo(event, 0, 'view')}
+          />
+          <circle data-gizmo-center r={10} className="gizmo-center" />
+        </>
       )}
     </svg>
   )
