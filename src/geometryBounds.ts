@@ -22,22 +22,6 @@ export const boundsOf = (geometries: unknown[]): Bounds | null => {
   }
 }
 
-const EDGES: [number, number][] = [
-  [0, 1], [1, 3], [3, 2], [2, 0],
-  [4, 5], [5, 7], [7, 6], [6, 4],
-  [0, 4], [1, 5], [2, 6], [3, 7],
-]
-
-/** 경계 상자를 선 그리기용 정점 쌍으로 편다 */
-export const boxWireframe = ({ min, max }: Bounds) => {
-  const corner = (index: number): [number, number, number] => [
-    index & 1 ? max[0] : min[0],
-    index & 2 ? max[1] : min[1],
-    index & 4 ? max[2] : min[2],
-  ]
-  return EDGES.flatMap(([from, to]) => [corner(from), corner(to)])
-}
-
 /** 치수 숫자를 붙일 세 모서리의 가운데 점 */
 export const dimensionAnchors = ({ min, max, size }: Bounds) => [
   { axis: 'x' as const, point: [(min[0] + max[0]) / 2, min[1], min[2]], value: size[0] },

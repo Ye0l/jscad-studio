@@ -17,11 +17,13 @@ export interface CodeEditorHandle {
 interface Props {
   value: string
   fontSize: number
+  /** 시각 모드에서는 코드가 객체에서 만들어지므로 읽기 전용으로 둔다 */
+  readOnly?: boolean
   onChange: (value: string) => void
   apiRef?: RefObject<CodeEditorHandle | null>
 }
 
-export function CodeEditor({ value, fontSize, onChange, apiRef }: Props) {
+export function CodeEditor({ value, fontSize, readOnly = false, onChange, apiRef }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
   const onChangeRef = useRef(onChange)
@@ -42,6 +44,8 @@ export function CodeEditor({ value, fontSize, onChange, apiRef }: Props) {
           oneDark,
           keymap.of([indentWithTab]),
           EditorView.lineWrapping,
+          EditorState.readOnly.of(readOnly),
+          EditorView.editable.of(!readOnly),
           EditorView.theme({
             '&': { height: '100%', fontSize: `${fontSize}px`, backgroundColor: '#111317' },
             '.cm-scroller': { fontFamily: "'JetBrains Mono', 'SFMono-Regular', Consolas, monospace", lineHeight: '1.65' },
@@ -78,9 +82,9 @@ export function CodeEditor({ value, fontSize, onChange, apiRef }: Props) {
       if (apiRef) apiRef.current = null
       view.destroy()
     }
-    // Editor instance is deliberately recreated only when font size changes.
+    // Editor instance is deliberately recreated only when font size or edit mode changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fontSize])
+  }, [fontSize, readOnly])
 
   useEffect(() => {
     const view = viewRef.current
@@ -88,6 +92,6 @@ export function CodeEditor({ value, fontSize, onChange, apiRef }: Props) {
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value } })
   }, [value])
 
-  return <div className="code-editor" ref={hostRef} />
+  return <div className={`code-editor${readOnly ? ' is-readonly' : ''}`} ref={hostRef} />
 }
 

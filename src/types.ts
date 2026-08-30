@@ -1,7 +1,7 @@
 import type { DockNode } from './dock/types'
 import type { GitSettings } from './git'
 
-export type ProjectTemplate = 'blank' | 'keycap' | 'plate'
+export type ProjectTemplate = 'visual' | 'blank' | 'keycap' | 'plate'
 
 export interface ProjectMeta {
   id: string
@@ -22,6 +22,10 @@ export interface AppSettings {
   uiScale: number
   rotateSensitivity: number
   zoomSensitivity: number
+  /** 가로로 끌 때 도는 방향. 손가락을 따라오게 할지, 반대로 돌릴지 */
+  invertOrbitX: boolean
+  /** 뷰포트에서 객체를 직접 끌어 옮기는 기즈모 */
+  gizmo: boolean
   /** 코드를 다시 실행할 때 미리보기 카메라를 모델에 맞출지 */
   autoFit: boolean
   /** 도크 레이아웃. 처음 실행이거나 저장본이 깨졌으면 null */

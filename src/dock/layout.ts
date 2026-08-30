@@ -183,11 +183,25 @@ export const pruneTabs = (root: DockNode | null, keep: (tab: TabId) => boolean):
   return normalize(result)
 }
 
-export const defaultLayout = (projectId: string): DockNode => split('row', [
-  group(['projects', 'shapes'], 'projects'),
-  group([makeTab('editor', projectId)]),
-  group([makeTab('preview', projectId)]),
-], [0.21, 0.36, 0.43])
+/**
+ * 기본 배치. 화면이 좁은 태블릿 세로 모드에서는 네 칸이 다 들어가지 않으므로
+ * 패널을 탭으로 묶어 두 칸만 쓴다.
+ */
+export const defaultLayout = (projectId: string): DockNode => {
+  const wide = typeof window === 'undefined' ? true : window.innerWidth >= 1100
+  if (!wide) {
+    return split('row', [
+      group(['objects', 'inspector', 'stack', 'projects', 'shapes'], 'objects'),
+      group([makeTab('preview', projectId), makeTab('editor', projectId)], makeTab('preview', projectId)),
+    ], [0.4, 0.6])
+  }
+  return split('row', [
+    group(['objects', 'projects', 'shapes'], 'objects'),
+    group([makeTab('preview', projectId)]),
+    group([makeTab('editor', projectId)]),
+    group(['inspector', 'stack'], 'inspector'),
+  ], [0.19, 0.34, 0.28, 0.19])
+}
 
 /** 저장된 레이아웃이 우리가 아는 모양인지 확인한다 (오래된 저장본·손상된 값 방어) */
 export const isDockNode = (value: unknown): value is DockNode => {
