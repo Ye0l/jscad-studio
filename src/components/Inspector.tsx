@@ -11,7 +11,7 @@ interface Props {
   layout: Layout
   selection: string[]
   /** typing 이 true 면 코드를 치는 중이라 재계산을 서두르지 않는다 */
-  onScene: (next: Scene, options?: { typing?: boolean }) => void
+  onScene: (next: Scene, options?: { typing?: boolean; coalesce?: string }) => void
   fontSize?: number
   /** 코드 객체를 큰 창에서 열고 싶을 때 */
   onExpandCode?: () => void
@@ -302,7 +302,10 @@ export function Inspector({ scene, layout, selection, onScene, onCommit, fontSiz
             <CodeEditor
               value={node.code}
               fontSize={fontSize}
-              onChange={(code) => onScene(patchNode(scene, node.id, { code } as never), { typing: true })}
+              onChange={(code) => onScene(
+                patchNode(scene, node.id, { code } as never),
+                { typing: true, coalesce: `code:${node.id}` },
+              )}
             />
           </div>
           <p className="muted-copy">module.exports = &#123; main &#125; 형태로 형상을 돌려주세요. 아래 모서리를 끌면 높이를 바꿀 수 있습니다.</p>

@@ -73,7 +73,29 @@ interface OpenDoc {
   dragging: boolean
   /** 마지막 계산에 걸린 시간 (ms). 가벼우면 끌면서도 형상을 갱신한다 */
   lastEvalMs: number
+  /** 되돌리기 기록. 장면과 선택을 함께 담는다 */
+  history: History
 }
+
+interface Snapshot {
+  scene: Scene
+  selection: string[]
+}
+
+interface History {
+  past: Snapshot[]
+  future: Snapshot[]
+  /** 이어지는 편집을 한 걸음으로 묶기 위한 표시 */
+  key: string | null
+  at: number
+}
+
+const EMPTY_HISTORY: History = { past: [], future: [], key: null, at: 0 }
+
+/** 되돌리기 기록 최대 걸음 수 */
+const HISTORY_LIMIT = 80
+/** 같은 표시의 편집이 이 시간 안에 이어지면 한 걸음으로 묶는다 */
+const COALESCE_MS = 900
 
 /** 시각 모드인지 — 장면이 있으면 장면이 원본이고 코드는 거기서 만들어진다 */
 const isVisual = (doc: OpenDoc | null | undefined) => !!doc?.scene
@@ -97,6 +119,7 @@ const makeDoc = (project: Project): OpenDoc => {
     revisionKind: scene ? 'scene' : 'code',
     dragging: false,
     lastEvalMs: 0,
+    history: EMPTY_HISTORY,
   }
 }
 
@@ -120,6 +143,26 @@ const main = () => cuboid({ size: [10, 10, 10] })
 
 module.exports = { main }
 `
+
+/**
+ * 편집 직전 상태를 기록에 쌓는다.
+ * 기즈모를 끄는 동안이나 숫자를 이어 고치는 동안에는 걸음이 잘게 쪼개지지 않도록
+ * 같은 표시가 이어지면 앞선 기록 하나로 묶는다.
+ */
+const remember = (doc: OpenDoc, coalesce?: string): History => {
+  const history = doc.history
+  const now = Date.now()
+  const merge = !!coalesce && history.key === coalesce && now - history.at < COALESCE_MS && history.past.length > 0
+  if (merge) return { ...history, future: [], at: now }
+  if (!doc.scene) return { past: history.past, future: [], key: coalesce ?? null, at: now }
+  const past = [...history.past, { scene: doc.scene, selection: doc.selection }]
+  return {
+    past: past.length > HISTORY_LIMIT ? past.slice(past.length - HISTORY_LIMIT) : past,
+    future: [],
+    key: coalesce ?? null,
+    at: now,
+  }
+}
 
 /** 기즈모로 끈 값을 사람이 읽기 좋은 눈금에 맞춘다 */
 const snap = (value: number, step: number) => Math.round(value / step) * step
@@ -197,7 +240,12 @@ export function App() {
   }, [])
 
   /** 객체 트리·속성·기즈모가 장면을 고쳤을 때 */
-  const updateScene = useCallback((id: string, next: Scene, selection?: string[], typing = false) => {
+  const updateScene = useCallback((
+    id: string,
+    next: Scene,
+    selection?: string[],
+    options: { typing?: boolean; coalesce?: string } = {},
+  ) => {
     setDocs((current) => {
       const target = current[id]
       if (!target) return current
@@ -215,7 +263,36 @@ export function App() {
           project: { ...target.project, code: composeDocument(target.code, next) },
           revision: target.revision + 1,
           // 코드를 치는 중이면 코드 편집과 같은 규칙(자동 실행 설정·긴 대기)을 따른다
-          revisionKind: typing ? 'code' : 'scene',
+          revisionKind: options.typing ? 'code' : 'scene',
+          history: remember(target, options.coalesce),
+        },
+      }
+    })
+  }, [])
+
+  /** 되돌리기 한 걸음 옮기기. 방향에 따라 지난 기록과 앞선 기록을 맞바꾼다 */
+  const stepHistory = useCallback((id: string, direction: 'undo' | 'redo') => {
+    setDocs((current) => {
+      const target = current[id]
+      const { past, future } = target?.history ?? EMPTY_HISTORY
+      const stack = direction === 'undo' ? past : future
+      const step = stack[stack.length - 1]
+      if (!target || !target.scene || !step) return current
+      const kept: Snapshot = { scene: target.scene, selection: target.selection }
+      return {
+        ...current,
+        [id]: {
+          ...target,
+          scene: step.scene,
+          selection: step.selection.filter((nodeId) => step.scene.nodes[nodeId]),
+          layout: previewLayout(step.scene, target.localBounds),
+          dirty: true,
+          project: { ...target.project, code: composeDocument(target.code, step.scene) },
+          revision: target.revision + 1,
+          revisionKind: 'scene',
+          history: direction === 'undo'
+            ? { past: past.slice(0, -1), future: [...future, kept], key: null, at: 0 }
+            : { past: [...past, kept], future: future.slice(0, -1), key: null, at: 0 },
         },
       }
     })
@@ -652,6 +729,7 @@ export function App() {
           selection: [],
           items: [],
           layout: {},
+          history: EMPTY_HISTORY,
           dirty: true,
           project: { ...target.project, code: composeDocument(code, null) },
           revision: target.revision + 1,
@@ -700,6 +778,8 @@ export function App() {
   const gizmoBaseRef = useRef<{
     docId: string
     nodeId: string
+    /** 이 끌기 한 번이 되돌리기 한 걸음이 되도록 붙이는 표시 */
+    key: string
     transform: SceneNode['transform']
     params: Record<string, number>
     half: Vec3
@@ -714,6 +794,7 @@ export function App() {
     gizmoBaseRef.current = {
       docId,
       nodeId,
+      key: `gizmo:${Date.now()}`,
       transform: structuredClone(node.transform),
       params: node.type === 'primitive' ? { ...node.params } : {},
       half: bounds
@@ -735,14 +816,14 @@ export function App() {
       // 월드에서 끈 거리를 부모 좌표계 값으로 되돌린 뒤 0.5mm 로 맞춘다
       const local = worldDeltaToLocal(scene, target.layout, base.nodeId, payload.delta)
       const position = [0, 1, 2].map((axis) => snap(base.transform.position[axis] + local[axis], 0.5)) as Vec3
-      updateScene(base.docId, setTransform(scene, base.nodeId, { position }))
+      updateScene(base.docId, setTransform(scene, base.nodeId, { position }), undefined, { coalesce: base.key })
       return
     }
 
     if (payload.mode === 'rotate') {
       const rotation = [...base.transform.rotation] as Vec3
       rotation[payload.axis] = snap(rotation[payload.axis] + payload.degrees, 1)
-      updateScene(base.docId, setTransform(scene, base.nodeId, { rotation }))
+      updateScene(base.docId, setTransform(scene, base.nodeId, { rotation }), undefined, { coalesce: base.key })
       return
     }
 
@@ -756,12 +837,12 @@ export function App() {
       // 양쪽으로 자라는 값(가로·세로·높이)은 손잡이가 움직인 거리의 두 배가 된다
       const symmetric = key !== 'radius'
       const next = Math.max(0.1, snap((base.params[key] ?? 1) + grow * (symmetric ? 2 : 1), 0.1))
-      updateScene(base.docId, setParam(scene, base.nodeId, key, next))
+      updateScene(base.docId, setParam(scene, base.nodeId, key, next), undefined, { coalesce: base.key })
       return
     }
     const scale = [...base.transform.scale] as Vec3
     scale[payload.axis] = Math.max(0.01, snap(scale[payload.axis] * (1 + grow / base.half[payload.axis]), 0.01))
-    updateScene(base.docId, setTransform(scene, base.nodeId, { scale }))
+    updateScene(base.docId, setTransform(scene, base.nodeId, { scale }), undefined, { coalesce: base.key })
   }, [updateScene])
 
   const endGizmo = useCallback(() => {
@@ -806,6 +887,17 @@ export function App() {
       const target = event.target as HTMLElement | null
       const typing = !!target?.closest('input, textarea, select, [contenteditable="true"], .cm-editor')
       const current = focusedId ? docsRef.current[focusedId] : null
+      // 코드 편집기 안에서는 편집기 자신의 되돌리기가 동작해야 하므로 건드리지 않는다
+      if (!typing && mod && current?.scene && focusedId && event.key.toLowerCase() === 'z') {
+        event.preventDefault()
+        stepHistory(focusedId, event.shiftKey ? 'redo' : 'undo')
+        return
+      }
+      if (!typing && mod && current?.scene && focusedId && event.key.toLowerCase() === 'y') {
+        event.preventDefault()
+        stepHistory(focusedId, 'redo')
+        return
+      }
       if (!typing && current?.scene && current.selection.length && focusedId) {
         if (event.key === 'Delete' || event.key === 'Backspace') {
           event.preventDefault()
@@ -844,7 +936,7 @@ export function App() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [dialog, closeDialog, saveDocs, execute, focusedId, openNewDialog, openView, toggleView, updateScene, setSelection])
+  }, [dialog, closeDialog, saveDocs, execute, focusedId, openNewDialog, openView, toggleView, updateScene, setSelection, stepHistory])
 
   const filteredProjects = useMemo(
     () => index?.projects.filter((item) => item.name.toLowerCase().includes(query.toLowerCase())) ?? [],
@@ -968,8 +1060,8 @@ export function App() {
             if (!result.id) return
             updateScene(docId, result.scene, [result.id])
             toast(result.hiddenSkipped
-              ? `코드 객체로 바꿨습니다. 숨긴 하위 객체 ${result.hiddenSkipped}개는 코드에 담기지 않았습니다.`
-              : '코드 객체로 바꿨습니다. 객체로 되돌릴 수는 없습니다.', result.hiddenSkipped ? 'info' : 'success')
+              ? `코드 객체로 바꿨습니다. 숨긴 하위 객체 ${result.hiddenSkipped}개는 코드에 담기지 않았습니다. (Ctrl Z 로 되돌리기)`
+              : '코드 객체로 바꿨습니다. 마음에 안 들면 Ctrl Z 로 되돌리세요.', result.hiddenSkipped ? 'info' : 'success')
           },
         }]),
         ...(node.parent ? [{
@@ -1105,6 +1197,10 @@ export function App() {
           scene={doc.scene}
           selection={doc.selection}
           renamingId={renaming}
+          canUndo={doc.history.past.length > 0}
+          canRedo={doc.history.future.length > 0}
+          onUndo={() => stepHistory(focusedId, 'undo')}
+          onRedo={() => stepHistory(focusedId, 'redo')}
           onSelect={(nodeId, mode) => selectNode(focusedId, nodeId, mode)}
           onScene={(next) => updateScene(focusedId, next)}
           onMenu={(nodeId, point) => nodeMenu(focusedId, nodeId, point)}
@@ -1125,7 +1221,11 @@ export function App() {
           layout={doc.layout}
           selection={doc.selection}
           fontSize={Math.max(11, settings.fontSize - 2)}
-          onScene={(next, options) => updateScene(focusedId, next, undefined, options?.typing)}
+          onScene={(next, options) => updateScene(focusedId, next, undefined, {
+            ...options,
+            // 한 객체의 값을 이어 고치는 동안에는 되돌리기 걸음이 잘게 쪼개지지 않게 한다
+            coalesce: options?.coalesce ?? `inspector:${doc.selection[doc.selection.length - 1] ?? ''}`,
+          })}
           onExpandCode={() => setDialog({ kind: 'codeNode' })}
         />
       )
@@ -1137,7 +1237,7 @@ export function App() {
           scene={doc?.scene ?? null}
           layout={doc?.layout ?? {}}
           selection={doc?.selection ?? []}
-          onScene={(next) => updateScene(focusedId, next)}
+          onScene={(next, options) => updateScene(focusedId, next, undefined, options)}
           onSelect={(nodeId) => selectNode(focusedId, nodeId, 'single')}
           onCreate={() => {
             const target = docsRef.current[focusedId]
@@ -1424,7 +1524,12 @@ export function App() {
                   <CodeEditor
                     value={node.code}
                     fontSize={settings.fontSize}
-                    onChange={(code) => updateScene(focusedId, patchNode(target.scene!, nodeId, { code } as never), undefined, true)}
+                    onChange={(code) => updateScene(
+                      focusedId,
+                      patchNode(target.scene!, nodeId, { code } as never),
+                      undefined,
+                      { typing: true, coalesce: `code:${nodeId}` },
+                    )}
                   />
                 </div>
               </div>
@@ -1432,7 +1537,7 @@ export function App() {
           })()}
           {dialog.kind === 'licenses' && <Licenses />}
           {dialog.kind === 'shortcuts' && <div className="shortcut-grid">
-            <span>실행</span><kbd>Ctrl Enter</kbd><span>저장</span><kbd>Ctrl S</kbd><span>새 프로젝트</span><kbd>Ctrl N</kbd><span>프로젝트 검색</span><kbd>Ctrl P</kbd><span>프로젝트 패널</span><kbd>Ctrl B</kbd><span>출력 패널</span><kbd>Ctrl J</kbd><span>내보내기</span><kbd>Ctrl E</kbd><span>이미지로 렌더</span><kbd>Ctrl R</kbd><span>설정</span><kbd>Ctrl ,</kbd><span>자동완성</span><kbd>Ctrl Space</kbd><span>객체 복제</span><kbd>Ctrl D</kbd><span>이동·회전·크기 기즈모</span><kbd>G R H</kbd><span>객체 삭제</span><kbd>Delete</kbd><span>선택 해제 · 창 닫기</span><kbd>Esc</kbd>
+            <span>실행</span><kbd>Ctrl Enter</kbd><span>저장</span><kbd>Ctrl S</kbd><span>새 프로젝트</span><kbd>Ctrl N</kbd><span>프로젝트 검색</span><kbd>Ctrl P</kbd><span>프로젝트 패널</span><kbd>Ctrl B</kbd><span>출력 패널</span><kbd>Ctrl J</kbd><span>내보내기</span><kbd>Ctrl E</kbd><span>이미지로 렌더</span><kbd>Ctrl R</kbd><span>설정</span><kbd>Ctrl ,</kbd><span>자동완성</span><kbd>Ctrl Space</kbd><span>되돌리기 · 다시 실행</span><kbd>Ctrl Z / Ctrl ⇧ Z</kbd><span>객체 복제</span><kbd>Ctrl D</kbd><span>이동·회전·크기 기즈모</span><kbd>G R H</kbd><span>객체 삭제</span><kbd>Delete</kbd><span>선택 해제 · 창 닫기</span><kbd>Esc</kbd>
           </div>}
         </Modal>
       )}
