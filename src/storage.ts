@@ -18,6 +18,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   zoomSensitivity: 0.3,
   invertOrbitX: false,
   gizmo: true,
+  autoFit: false,
   dock: null,
   git: null,
 }

@@ -1,8 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import {
-  Box, Boxes, Braces, ChevronRight, Cloud, Code2, Copy, Diff, Download, Eye, FolderOpen, Grid3X3,
-  Group as GroupIcon, Layers, LayoutGrid, Maximize, Move3d, Pencil, Play, Plus, RotateCw, Save,
-  Scale3d, Settings, Settings2, SquareStack, Terminal, Trash2, X,
+  Box, Boxes, Braces, Camera, ChevronRight, Cloud, Code2, Copy, Diff, Download, Eye, FolderOpen,
+  Grid3X3, Group as GroupIcon, Layers, LayoutGrid, Maximize, Move3d, Pencil, Play, Plus, RotateCw,
+  Ruler, Save, Scale3d, Settings, Settings2, SquareStack, Terminal, Trash2, X,
 } from 'lucide-react'
 import { CodeEditor, type CodeEditorHandle } from './components/CodeEditor'
 import { ContextMenu, type MenuItem } from './components/ContextMenu'
@@ -14,9 +14,10 @@ import { StackEditor } from './components/StackEditor'
 import { Licenses } from './components/Licenses'
 import { Modal } from './components/Modal'
 import { ProjectList } from './components/ProjectList'
+import { RenderPanel } from './components/RenderPanel'
 import { SnippetPalette, type DropPoint } from './components/SnippetPalette'
 import { Toggle } from './components/Toggle'
-import { Viewer } from './components/Viewer'
+import { Viewer, type ViewerHandle } from './components/Viewer'
 import {
   allTabs, defaultLayout, isDockNode, makeTab, openTab, openTabAtRoot,
   pruneTabs, readTab, removeTab, reserveIds,
@@ -107,6 +108,7 @@ const DIALOG_TITLES: Record<NonNullable<DialogState>['kind'], string> = {
   licenses: '오픈소스 라이선스',
   export: '내보내기',
   git: 'GitHub 연동',
+  render: '이미지로 렌더',
 }
 
 /** 코드 객체를 새로 만들 때 넣어 두는 뼈대 */
@@ -141,6 +143,7 @@ export function App() {
   const [renameValue, setRenameValue] = useState('')
   const [query, setQuery] = useState('')
   const [showGrid, setShowGrid] = useState(true)
+  const [showDimensions, setShowDimensions] = useState(false)
   /** 값이 오를 때마다 미리보기가 모델에 화면을 맞춘다 */
   const [fitToken, setFitToken] = useState(1)
   const [gizmoMode, setGizmoMode] = useState<GizmoMode>('move')
@@ -152,6 +155,7 @@ export function App() {
   const saveTimerRef = useRef<number | null>(null)
   const loadingRef = useRef(new Set<string>())
   const editorApis = useRef(new Map<string, { current: CodeEditorHandle | null }>())
+  const viewerApis = useRef(new Map<string, { current: ViewerHandle | null }>())
   const indexRef = useRef<ProjectIndex | null>(null)
   const docsRef = useRef<Record<string, OpenDoc>>({})
 
@@ -538,6 +542,14 @@ export function App() {
     return created
   }, [])
 
+  const viewerRefFor = useCallback((id: string) => {
+    const existing = viewerApis.current.get(id)
+    if (existing) return existing
+    const created = { current: null as ViewerHandle | null }
+    viewerApis.current.set(id, created)
+    return created
+  }, [])
+
   const editorAt = (point: DropPoint | null) => {
     if (!point) return null
     const stack = document.elementsFromPoint(point.x, point.y)
@@ -822,6 +834,7 @@ export function App() {
       if (key === 'n') { event.preventDefault(); openNewDialog() }
       if (key === 'p') { event.preventDefault(); openView('projects'); window.setTimeout(() => searchRef.current?.focus(), 80) }
       if (key === 'e') { event.preventDefault(); setDialog({ kind: 'export' }) }
+      if (key === 'r') { event.preventDefault(); setDialog({ kind: 'render' }) }
       if (key === ',') { event.preventDefault(); setDialog({ kind: 'settings' }) }
       if (key === 'b') { event.preventDefault(); toggleView('projects') }
       if (key === 'j') { event.preventDefault(); toggleView('console') }
@@ -841,6 +854,49 @@ export function App() {
 
   const stats = dialog?.kind === 'export' && doc ? measureModel(doc.geometries) : null
   const openProjectIds = [...new Set((dock ? allTabs(dock) : []).map((tab) => readTab(tab).projectId).filter(Boolean))] as string[]
+
+  /** 렌더 이미지가 화면과 같은 비율로 나오도록 열려 있는 미리보기 크기를 잰다 */
+  const previewSize = () => {
+    if (!focusedId) return null
+    const element = document.querySelector(`[data-preview-project="${focusedId}"]`)
+    const box = element?.getBoundingClientRect()
+    return box && box.width > 40 ? { width: box.width, height: box.height } : null
+  }
+
+  const openViewMenu = (anchor: HTMLElement) => {
+    const box = anchor.getBoundingClientRect()
+    const open = dock ? allTabs(dock) : []
+    const entry = (kind: ViewKind, label: string, icon: ReactNode, projectId?: string): MenuItem => {
+      const tab = makeTab(kind, projectId)
+      return {
+        id: tab,
+        label: `${label} ${open.includes(tab) ? '닫기' : '열기'}`,
+        icon,
+        onSelect: () => toggleView(kind, projectId),
+      }
+    }
+    setMenu({
+      point: { x: Math.max(8, box.right - 210), y: box.bottom + 6 },
+      items: [
+        entry('objects', '객체', <Boxes size={15} />),
+        entry('inspector', '속성', <Settings2 size={15} />),
+        entry('stack', '적층', <Layers size={15} />),
+        entry('projects', '프로젝트', <FolderOpen size={15} />),
+        entry('shapes', '도형', <Box size={15} />),
+        entry('console', '출력', <Terminal size={15} />),
+        ...(focusedId ? [
+          entry('editor', '코드', <Code2 size={15} />, focusedId),
+          entry('preview', '미리보기', <Eye size={15} />, focusedId),
+        ] : []),
+        {
+          id: 'reset',
+          label: '기본 배치로 되돌리기',
+          icon: <LayoutGrid size={15} />,
+          onSelect: () => applyDock(defaultLayout(focusedId ?? index.projects[0].id), true),
+        },
+      ],
+    })
+  }
 
   const projectMenu = (id: string, point: { x: number; y: number }) => {
     const meta = index.projects.find((item) => item.id === id)
@@ -1097,7 +1153,7 @@ export function App() {
     }
     const related = highlightOf(target)
     return (
-      <div className="viewer-wrap" onPointerDown={() => setFocusedId(projectId)}>
+      <div className="viewer-wrap" data-preview-project={projectId} onPointerDown={() => setFocusedId(projectId)}>
         <Viewer
           geometries={related.rest}
           highlighted={related.selected}
@@ -1115,6 +1171,9 @@ export function App() {
           onGizmoMove={applyGizmo}
           onGizmoEnd={endGizmo}
           onPick={target.scene ? (ray) => pickAt(projectId, ray) : undefined}
+          showDimensions={showDimensions}
+          autoFit={settings.autoFit}
+          apiRef={viewerRefFor(projectId)}
         />
         <div className="viewer-hint">드래그: 회전 · Shift+드래그: 이동 · 휠/핀치: 확대</div>
         {target.runState === 'error' && <div className="error-overlay"><X size={18} /><span>{target.runMessage}</span></div>}
@@ -1123,7 +1182,7 @@ export function App() {
   }
 
   const renderActions = (tab: TabId) => {
-    const { kind } = readTab(tab)
+    const { kind, projectId } = readTab(tab)
     if (kind === 'projects') {
       return <button className="icon-button tiny" onClick={openNewDialog} aria-label="새 프로젝트"><Plus size={16} /></button>
     }
@@ -1145,10 +1204,23 @@ export function App() {
               {icon}
             </button>
           ))}
-          <button className="icon-button tiny" onClick={() => setFitToken((value) => value + 1)} aria-label="화면 맞춤" title="모델을 화면에 맞춘다">
+          <button
+            className="icon-button tiny"
+            // 이 탭의 미리보기만 맞춘다. 아직 준비 전이면 다음 그리기에서 맞추도록 표시만 남긴다
+            onClick={() => {
+              const viewer = projectId ? viewerApis.current.get(projectId)?.current : null
+              if (viewer) viewer.fit()
+              else setFitToken((value) => value + 1)
+            }}
+            aria-label="화면에 맞추기"
+            title="모델을 화면에 맞춘다"
+          >
             <Maximize size={16} />
           </button>
-          <button className={`icon-button tiny${showGrid ? ' selected' : ''}`} onClick={() => setShowGrid((value) => !value)} aria-label="그리드 토글">
+          <button className={`icon-button tiny${showDimensions ? ' selected' : ''}`} onClick={() => setShowDimensions((value) => !value)} aria-label="치수 표시" title="치수 표시">
+            <Ruler size={16} />
+          </button>
+          <button className={`icon-button tiny${showGrid ? ' selected' : ''}`} onClick={() => setShowGrid((value) => !value)} aria-label="그리드 토글" title="격자와 축">
             <Grid3X3 size={16} />
           </button>
         </>
@@ -1181,7 +1253,9 @@ export function App() {
         <div className="top-actions">
           <button className="button ghost" onClick={() => void saveDocs(focusedId ? [focusedId] : [], true)} disabled={!doc}><Save size={17} /><span>저장</span><kbd>Ctrl S</kbd></button>
           <button className="button primary" onClick={() => focusedId && void execute(focusedId)} disabled={!doc || runState === 'running'}><Play size={17} fill="currentColor" /><span>실행</span><kbd>Ctrl ↵</kbd></button>
+          <button className="icon-button" onClick={() => setDialog({ kind: 'render' })} aria-label="이미지로 렌더" title="이미지로 렌더 (Ctrl R)"><Camera size={19} /></button>
           <button className="icon-button" onClick={() => setDialog({ kind: 'export' })} aria-label="내보내기" title="STL·3MF 내보내기 (Ctrl E)"><Download size={19} /></button>
+          <button className="icon-button" onClick={(event) => openViewMenu(event.currentTarget)} aria-label="보기" title="패널 열고 닫기"><LayoutGrid size={19} /></button>
           <button className={`icon-button${settings.git ? ' selected' : ''}`} onClick={() => setDialog({ kind: 'git' })} aria-label="GitHub 연동" title={settings.git ? `${settings.git.repo} 와 동기화` : 'GitHub 연동'}><Cloud size={19} /></button>
           <button className="icon-button" onClick={() => setDialog({ kind: 'settings' })} aria-label="설정"><Settings size={19} /></button>
         </div>
@@ -1249,22 +1323,23 @@ export function App() {
             <Toggle checked={settings.motion} onChange={(motion) => updateSettings({ motion })} label="모션과 전환" description="패널, 모달, 토스트가 짧게 이어지도록 표시" />
             <Toggle checked={settings.autoRun} onChange={(autoRun) => updateSettings({ autoRun })} label="코드 자동 실행" description="입력이 멈춘 뒤 0.5초 후 미리보기 갱신" />
             <Toggle checked={settings.autoSave} onChange={(autoSave) => updateSettings({ autoSave })} label="프로젝트 자동 저장" description="변경 내용을 앱 내부 저장소에 자동 보관" />
+            <Toggle checked={settings.autoFit} onChange={(autoFit) => updateSettings({ autoFit })} label="실행할 때 화면 맞추기" description="끄면 코드를 다시 실행해도 보던 각도와 확대를 그대로 둡니다" />
             <label className="font-setting"><span><strong>UI 배율</strong><small>버튼과 패널을 화면에 맞게 확대·축소</small></span><div><input type="range" min="0.85" max="1.3" step="0.05" value={settings.uiScale} onChange={(e) => updateSettings({ uiScale: Number(e.target.value) })} /><output>{Math.round(settings.uiScale * 100)}%</output></div></label>
             <label className="font-setting"><span><strong>편집기 글자 크기</strong><small>물리 키보드 사용 시 가독성 조절</small></span><div><input type="range" min="12" max="22" value={settings.fontSize} onChange={(e) => updateSettings({ fontSize: Number(e.target.value) })} /><output>{settings.fontSize}px</output></div></label>
             <label className="font-setting"><span><strong>3D 회전 감도</strong><small>마우스와 한 손가락 드래그의 회전 속도</small></span><div><input type="range" min="0.1" max="1.2" step="0.05" value={settings.rotateSensitivity} onChange={(e) => updateSettings({ rotateSensitivity: Number(e.target.value) })} /><output>{Math.round(settings.rotateSensitivity * 100)}%</output></div></label>
-            <Toggle
-              checked={settings.gizmo}
-              onChange={(gizmo) => updateSettings({ gizmo })}
-              label="뷰포트 직접 조작"
-              description="고른 객체에 이동·회전·크기 손잡이를 표시"
-            />
+            <label className="font-setting"><span><strong>확대·축소 감도</strong><small>휠과 두 손가락 핀치의 줌 속도</small></span><div><input type="range" min="0.15" max="1.2" step="0.05" value={settings.zoomSensitivity} onChange={(e) => updateSettings({ zoomSensitivity: Number(e.target.value) })} /><output>{Math.round(settings.zoomSensitivity * 100)}%</output></div></label>
             <Toggle
               checked={settings.invertOrbitX}
               onChange={(invertOrbitX) => updateSettings({ invertOrbitX })}
               label="가로 회전 방향 뒤집기"
               description="좌우로 끌 때 도는 방향이 손에 맞지 않으면 켜세요"
             />
-            <label className="font-setting"><span><strong>확대·축소 감도</strong><small>휠과 두 손가락 핀치의 줌 속도</small></span><div><input type="range" min="0.15" max="1.2" step="0.05" value={settings.zoomSensitivity} onChange={(e) => updateSettings({ zoomSensitivity: Number(e.target.value) })} /><output>{Math.round(settings.zoomSensitivity * 100)}%</output></div></label>
+            <Toggle
+              checked={settings.gizmo}
+              onChange={(gizmo) => updateSettings({ gizmo })}
+              label="뷰포트 직접 조작"
+              description="고른 객체에 이동·회전·크기 손잡이를 표시"
+            />
             <button className="settings-link" onClick={() => setDialog({ kind: 'git' })}><span><strong>GitHub 연동</strong><small>{settings.git ? `${settings.git.repo} · ${settings.git.branch}` : '저장소 한 곳에 프로젝트를 보관하고 다른 기기와 이어 쓰기'}</small></span><ChevronRight size={17} /></button>
             <button className="settings-link" onClick={() => { applyDock(defaultLayout(focusedId ?? index.projects[0].id), true); toast('레이아웃을 기본값으로 되돌렸습니다.', 'success') }}><span><strong>레이아웃 초기화</strong><small>패널 배치와 크기를 처음 상태로</small></span><ChevronRight size={17} /></button>
             <button className="settings-link" onClick={() => setDialog({ kind: 'licenses' })}><span><strong>오픈소스 라이선스</strong><small>이 앱이 포함한 소프트웨어의 저작권과 라이선스 원문</small></span><ChevronRight size={17} /></button>
@@ -1295,9 +1370,18 @@ export function App() {
               toast={toast}
             />
           )}
+          {dialog.kind === 'render' && (
+            <RenderPanel
+              geometries={doc?.geometries ?? []}
+              camera={focusedId ? viewerApis.current.get(focusedId)?.current?.getCamera() ?? null : null}
+              viewport={previewSize()}
+              projectName={doc?.project.name ?? 'render'}
+              toast={toast}
+            />
+          )}
           {dialog.kind === 'licenses' && <Licenses />}
           {dialog.kind === 'shortcuts' && <div className="shortcut-grid">
-            <span>실행</span><kbd>Ctrl Enter</kbd><span>저장</span><kbd>Ctrl S</kbd><span>새 프로젝트</span><kbd>Ctrl N</kbd><span>프로젝트 검색</span><kbd>Ctrl P</kbd><span>프로젝트 패널</span><kbd>Ctrl B</kbd><span>출력 패널</span><kbd>Ctrl J</kbd><span>내보내기</span><kbd>Ctrl E</kbd><span>설정</span><kbd>Ctrl ,</kbd><span>자동완성</span><kbd>Ctrl Space</kbd><span>객체 복제</span><kbd>Ctrl D</kbd><span>이동·회전·크기 기즈모</span><kbd>G R H</kbd><span>객체 삭제</span><kbd>Delete</kbd><span>선택 해제 · 창 닫기</span><kbd>Esc</kbd>
+            <span>실행</span><kbd>Ctrl Enter</kbd><span>저장</span><kbd>Ctrl S</kbd><span>새 프로젝트</span><kbd>Ctrl N</kbd><span>프로젝트 검색</span><kbd>Ctrl P</kbd><span>프로젝트 패널</span><kbd>Ctrl B</kbd><span>출력 패널</span><kbd>Ctrl J</kbd><span>내보내기</span><kbd>Ctrl E</kbd><span>이미지로 렌더</span><kbd>Ctrl R</kbd><span>설정</span><kbd>Ctrl ,</kbd><span>자동완성</span><kbd>Ctrl Space</kbd><span>객체 복제</span><kbd>Ctrl D</kbd><span>이동·회전·크기 기즈모</span><kbd>G R H</kbd><span>객체 삭제</span><kbd>Delete</kbd><span>선택 해제 · 창 닫기</span><kbd>Esc</kbd>
           </div>}
         </Modal>
       )}

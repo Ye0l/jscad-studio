@@ -150,6 +150,27 @@ kbd { padding: 2px 5px; border: 1px solid #353b46; border-bottom-color: #4b5360;
 .panel-divider--y::before { left: 0; right: 0; top: 50%; height: 1px; transform: translateY(-50%); }
 .panel-divider--y::after { inset: -5px 0; }
 
+/* 치수 표시 */
+.dimension-layer { position: absolute; inset: 0; pointer-events: none; }
+.dimension-label { position: absolute; left: 0; top: 0; padding: 2px 6px; border-radius: 5px; background: rgba(10, 12, 15, .82); border: 1px solid rgba(255,255,255,.07); font: 10px 'JetBrains Mono', monospace; white-space: nowrap; opacity: 0; transition: opacity 120ms var(--ease); }
+.dimension-label.x { color: #ff9a9a; }
+.dimension-label.y { color: #9ae6a8; }
+.dimension-label.z { color: #9ab8ff; }
+.dimension-readout { position: absolute; left: 12px; top: 12px; padding: 5px 9px; border-radius: 7px; color: #c8d0da; background: rgba(10, 12, 15, .76); border: 1px solid rgba(255,255,255,.06); font: 10px 'JetBrains Mono', monospace; pointer-events: none; }
+
+/* 이미지 렌더 */
+.render-view { display: flex; flex-direction: column; gap: 11px; }
+.render-preview { min-height: 190px; display: grid; place-items: center; padding: 10px; border: 1px solid #272c35; border-radius: 9px; background: repeating-conic-gradient(#15181d 0% 25%, #101317 0% 50%) 50% / 16px 16px; }
+.render-preview img { max-width: 100%; max-height: 42vh; border-radius: 5px; }
+.render-options { display: flex; flex-direction: column; gap: 9px; }
+.option-row { display: flex; align-items: center; gap: 12px; }
+.option-row > span { width: 62px; flex: none; color: var(--muted); font-size: 11px; }
+.chip-row { flex: 1; display: flex; flex-wrap: wrap; gap: 5px; }
+.chip-row button { padding: 6px 10px; display: flex; flex-direction: column; align-items: center; gap: 2px; border: 1px solid #272c35; border-radius: 7px; background: #14171c; color: #b7bec8; font-size: 11px; cursor: pointer; transition: border-color 150ms var(--ease), color 150ms var(--ease); }
+.chip-row button small { color: #626a77; font: 9px 'JetBrains Mono', monospace; }
+.chip-row button:hover { border-color: #39404b; }
+.chip-row button.selected { border-color: var(--accent); color: #eaf5f2; background: var(--accent-soft); }
+
 /* GitHub 연동 */
 .git-form .field-row { display: flex; align-items: center; gap: 6px; }
 .git-form .field-row input { flex: 1; }

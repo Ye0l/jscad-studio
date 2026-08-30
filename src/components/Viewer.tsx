@@ -1,8 +1,23 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, type RefObject } from 'react'
 import * as rendererModule from '@jscad/regl-renderer'
+import { boundsOf, dimensionAnchors, type Bounds } from '../geometryBounds'
 import type { Box, Vec3 } from '../scene/types'
 
 export type GizmoMode = 'move' | 'rotate' | 'scale'
+
+export interface CameraState {
+  position: number[]
+  target: number[]
+  up: number[]
+  fov: number
+}
+
+export interface ViewerHandle {
+  /** 렌더 이미지가 지금 보는 각도를 그대로 쓰도록 카메라를 넘겨준다 */
+  getCamera: () => CameraState | null
+  /** 모델이 화면에 꽉 차도록 다시 맞춘다 */
+  fit: () => void
+}
 
 /** 기즈모를 끌 때 나오는 값. 언제나 “끌기 시작한 순간부터의 총 변화량”이다 */
 export type GizmoPayload =
@@ -17,6 +32,10 @@ interface Props {
   /** 고른 객체를 감싸는 상자 */
   selectionBox?: Box | null
   showGrid: boolean
+  /** 경계 상자와 X·Y·Z 실제 길이를 겹쳐 보여 준다 */
+  showDimensions?: boolean
+  /** 다시 실행할 때마다 화면을 모델에 맞출지. 꺼도 첫 실행에는 한 번 맞춘다 */
+  autoFit?: boolean
   /** 새 객체가 놓이는 작업면 높이 */
   workplaneOffset?: number
   rotateSensitivity: number
@@ -36,6 +55,7 @@ interface Props {
   /** 뷰포트를 탭했을 때 그 자리로 나가는 광선. 무엇을 고를지는 바깥에서 정한다 */
   onPick?: (ray: { origin: Vec3; direction: Vec3 }) => void
   onInteractionHint?: () => void
+  apiRef?: RefObject<ViewerHandle | null>
 }
 
 const AXIS_COLORS = ['#ff6f7a', '#7ee08a', '#7fb4ff']
@@ -58,6 +78,7 @@ const SOLID_COLOR = [0.27, 0.78, 0.68, 1]
 const SELECTED_COLOR = [1, 0.72, 0.29, 1]
 const BOX_COLOR = [1, 0.72, 0.29, 0.9]
 const PLANE_COLOR = [0.42, 0.58, 0.72, 0.55]
+const DIMENSION_COLOR = [0.42, 0.62, 0.78, 0.85]
 const GRID_COLOR = [0.42, 0.47, 0.56, 0.4]
 const GRID_SUB_COLOR = [0.35, 0.4, 0.48, 0.16]
 
@@ -96,10 +117,10 @@ const boxMatrix = (center: number[], size: number[]) => [
 ]
 
 export function Viewer({
-  geometries, highlighted, selectionBox, showGrid, workplaneOffset = 0,
-  rotateSensitivity, zoomSensitivity, invertOrbitX = false, fitToken = 0,
+  geometries, highlighted, selectionBox, showGrid, showDimensions = false, autoFit = false,
+  workplaneOffset = 0, rotateSensitivity, zoomSensitivity, invertOrbitX = false, fitToken = 0,
   gizmoOrigin = null, gizmoMode = 'move', gizmoLockedAxes, onGizmoStart, onGizmoMove, onGizmoEnd,
-  onPick, onInteractionHint,
+  onPick, onInteractionHint, apiRef,
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null)
   const runtimeRef = useRef<any>(null)
@@ -110,6 +131,13 @@ export function Viewer({
   // 탭인지 끌기인지 가리기 위해 누른 자리와 움직인 거리를 기억한다
   const tapRef = useRef<{ x: number; y: number; moved: boolean } | null>(null)
   const fittedRef = useRef({ token: -1, count: 0 })
+  /** 지금 그리고 있는 형상 entity. 화면 맞춤이 이 목록을 그대로 쓴다 */
+  const solidsRef = useRef<unknown[]>([])
+  const boundsRef = useRef<Bounds | null>(null)
+  const labelRefs = useRef<(HTMLSpanElement | null)[]>([])
+  const readoutRef = useRef<HTMLDivElement>(null)
+  const showDimensionsRef = useRef(showDimensions)
+  showDimensionsRef.current = showDimensions
   const svgRef = useRef<SVGSVGElement>(null)
   const projectRef = useRef<((point: Vec3) => Point | null) | null>(null)
   const gizmoRef = useRef<{ origin: Vec3 | null; mode: GizmoMode; locked: boolean[] }>(
@@ -176,6 +204,12 @@ export function Viewer({
       geometry: unitBoxLines(),
       color: PLANE_COLOR,
       model: boxMatrix([0, 0, 0], [1, 1, 0]),
+    }
+    const dimensionBox = {
+      visuals: { drawCmd: 'drawLines', show: false, transparent: true },
+      geometry: unitBoxLines(),
+      color: DIMENSION_COLOR,
+      model: boxMatrix([0, 0, 0], [1, 1, 1]),
     }
     /*
      * regl-renderer 는 entity 마다 draw command 를 한 번 만들어 캐시에 넣고 다시는 비우지 않는다.
@@ -324,6 +358,28 @@ export function Viewer({
       }
     }
 
+    /** 치수 숫자는 WebGL 대신 HTML 로 얹고, 프레임마다 화면 좌표만 갈아 끼운다 */
+    const paintLabels = () => {
+      const bounds = boundsRef.current
+      const labels = labelRefs.current
+      if (!showDimensionsRef.current || !bounds || !labels.length) return
+      dimensionAnchors(bounds).forEach((anchor, index) => {
+        const element = labels[index]
+        if (!element) return
+        const at = project(anchor.point as Vec3)
+        if (!at) {
+          element.style.opacity = '0'
+          return
+        }
+        element.style.opacity = '1'
+        element.style.transform = `translate(-50%, -50%) translate(${at.x}px, ${at.y}px)`
+        element.textContent = anchor.value.toFixed(anchor.value < 10 ? 2 : 1)
+      })
+      if (readoutRef.current) {
+        readoutRef.current.textContent = `${bounds.size.map((value) => value.toFixed(1)).join(' × ')} mm`
+      }
+    }
+
     let frame = 0
     const animate = () => {
       const update = orbit.update({ controls, camera })
@@ -334,15 +390,40 @@ export function Viewer({
       options.camera = camera
       render(options)
       paintGizmo()
+      paintLabels()
       frame = requestAnimationFrame(animate)
     }
     frame = requestAnimationFrame(animate)
-    runtimeRef.current = { renderer, cameraApi, orbit, camera, controls, options, render, selection, plane, guides, retire }
+    /** 지금 그리고 있는 형상에 화면을 맞춘다 */
+    const fitToSolids = () => {
+      const entities = solidsRef.current
+      if (!entities.length) return
+      const fit = orbit.zoomToFit({ controls, camera, entities })
+      Object.assign(controls, fit.controls)
+      Object.assign(camera, fit.camera)
+    }
+
+    runtimeRef.current = {
+      renderer, cameraApi, orbit, camera, controls, options, render,
+      selection, plane, dimensionBox, guides, retire, fitToSolids,
+    }
+    if (apiRef) {
+      apiRef.current = {
+        getCamera: () => ({
+          position: [...camera.position],
+          target: [...camera.target],
+          up: [...camera.up],
+          fov: camera.fov,
+        }),
+        fit: fitToSolids,
+      }
+    }
 
     return () => {
       cancelAnimationFrame(frame)
       observer.disconnect()
       runtimeRef.current = null
+      if (apiRef) apiRef.current = null
       // 탭을 닫으면 WebGL 컨텍스트째로 놓아 준다 (안 그러면 컨텍스트가 그대로 남는다)
       retire([])
       reglInstance?.destroy?.()
@@ -353,7 +434,7 @@ export function Viewer({
   useEffect(() => {
     const runtime = runtimeRef.current
     if (!runtime) return
-    const { renderer, options, selection, plane, guides, retire } = runtime
+    const { renderer, options, selection, plane, dimensionBox, guides, retire } = runtime
     const solids = renderer.entitiesFromSolids({ color: SOLID_COLOR }, geometries)
     // 형상 자체가 색을 들고 있으면 그 색이 이긴다. 고른 객체는 얕은 복사로 색만 덮어쓴다
     const picked = renderer.entitiesFromSolids(
@@ -361,7 +442,15 @@ export function Viewer({
       (highlighted ?? []).map((item) => ({ ...(item as object), color: SELECTED_COLOR })),
     )
     for (const guide of guides) guide.visuals.show = showGrid
-    options.entities = [...guides, plane, selection, ...solids, ...picked]
+    solidsRef.current = [...solids, ...picked]
+    // 치수는 실제 형상에서 잰다 (고른 객체도 모델의 일부다)
+    boundsRef.current = boundsOf([...geometries, ...(highlighted ?? [])])
+    const size = boundsRef.current?.size
+    if (boundsRef.current && size) {
+      const center = [0, 1, 2].map((axis) => (boundsRef.current!.min[axis] + boundsRef.current!.max[axis]) / 2)
+      dimensionBox.model = boxMatrix(center, size.map((value) => Math.max(value, 0.01)))
+    }
+    options.entities = [...guides, plane, selection, dimensionBox, ...solids, ...picked]
     // 방금 밀려난 형상의 GPU 자원을 바로 놓아 준다
     retire(options.entities)
   }, [geometries, highlighted, showGrid])
@@ -384,6 +473,15 @@ export function Viewer({
   useEffect(() => {
     const runtime = runtimeRef.current
     if (!runtime) return
+    runtime.dimensionBox.visuals.show = showDimensions && !!boundsRef.current
+    for (const label of labelRefs.current) {
+      if (label && !showDimensions) label.style.opacity = '0'
+    }
+  }, [showDimensions, geometries])
+
+  useEffect(() => {
+    const runtime = runtimeRef.current
+    if (!runtime) return
     runtime.plane.model = boxMatrix([0, 0, workplaneOffset], [400, 400, 0])
     runtime.plane.visuals.show = showGrid && Math.abs(workplaneOffset) > 1e-6
   }, [workplaneOffset, showGrid])
@@ -397,16 +495,12 @@ export function Viewer({
     const previousCount = fittedRef.current.count
     fittedRef.current.count = solids.length
     if (!solids.length) return
-    if (previousCount > 0 && fittedRef.current.token === fitToken) return
-    const entities = runtime.renderer.entitiesFromSolids({ color: SOLID_COLOR }, solids)
-    if (!entities.length) return
-    const fit = runtime.orbit.zoomToFit({ controls: runtime.controls, camera: runtime.camera, entities })
-    Object.assign(runtime.controls, fit.controls)
-    Object.assign(runtime.camera, fit.camera)
+    if (!autoFit && previousCount > 0 && fittedRef.current.token === fitToken) return
+    runtime.fitToSolids()
     fittedRef.current = { token: fitToken, count: solids.length }
-    // 형상이 바뀔 때마다 카메라가 튀지 않도록 개수와 fitToken 만 본다
+    // 형상이 바뀔 때마다 카메라가 튀지 않도록 개수와 fitToken 만 본다 (autoFit 을 켜면 매번 맞춘다)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fitToken, geometries.length, highlighted?.length])
+  }, [fitToken, autoFit, geometries, highlighted])
 
   const rotateBy = (dx: number, dy: number) => {
     const runtime = runtimeRef.current
@@ -672,6 +766,18 @@ export function Viewer({
       }}
     />
       {gizmoHandles}
+      {showDimensions && (
+        <div className="dimension-layer" aria-hidden>
+          {['x', 'y', 'z'].map((axis, index) => (
+            <span
+              key={axis}
+              className={`dimension-label ${axis}`}
+              ref={(element) => { labelRefs.current[index] = element }}
+            />
+          ))}
+        </div>
+      )}
+      {showDimensions && <div className="dimension-readout" ref={readoutRef} />}
     </div>
   )
 }
