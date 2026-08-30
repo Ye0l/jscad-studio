@@ -56,4 +56,5 @@ export type DialogState =
   | { kind: 'export' }
   | { kind: 'git' }
   | { kind: 'render' }
+  | { kind: 'codeNode' }
   | null

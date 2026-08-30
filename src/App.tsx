@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import {
   Box, Boxes, Braces, Camera, ChevronRight, Cloud, Code2, Copy, Diff, Download, Eye, FolderOpen,
-  Grid3X3, Group as GroupIcon, Layers, LayoutGrid, Maximize, Move3d, Pencil, Play, Plus, RotateCw,
-  Ruler, Save, Scale3d, Settings, Settings2, SquareStack, Terminal, Trash2, X,
+  FileCode, Grid3X3, Group as GroupIcon, Layers, LayoutGrid, Maximize, Move3d, Pencil, Play, Plus,
+  RotateCw, Ruler, Save, Scale3d, Settings, Settings2, SquareStack, Terminal, Trash2, X,
 } from 'lucide-react'
 import { CodeEditor, type CodeEditorHandle } from './components/CodeEditor'
 import { ContextMenu, type MenuItem } from './components/ContextMenu'
@@ -35,6 +35,7 @@ import {
   reorderNode, setParam, setTransform,
 } from './scene/model'
 import { PRIMITIVES, PRIMITIVE_KINDS } from './scene/primitives'
+import { toCodeNode } from './scene/convert'
 import { rayHitsBox, worldDeltaToLocal } from './scene/layout'
 import type { BuildItem } from './scene/build'
 import type { Box as SceneBox, BooleanOp, Layout, PrimitiveKind, Scene, SceneNode, Vec3 } from './scene/types'
@@ -109,6 +110,7 @@ const DIALOG_TITLES: Record<NonNullable<DialogState>['kind'], string> = {
   export: '내보내기',
   git: 'GitHub 연동',
   render: '이미지로 렌더',
+  codeNode: '코드 객체 편집',
 }
 
 /** 코드 객체를 새로 만들 때 넣어 두는 뼈대 */
@@ -195,7 +197,7 @@ export function App() {
   }, [])
 
   /** 객체 트리·속성·기즈모가 장면을 고쳤을 때 */
-  const updateScene = useCallback((id: string, next: Scene, selection?: string[]) => {
+  const updateScene = useCallback((id: string, next: Scene, selection?: string[], typing = false) => {
     setDocs((current) => {
       const target = current[id]
       if (!target) return current
@@ -212,7 +214,8 @@ export function App() {
           dirty: true,
           project: { ...target.project, code: composeDocument(target.code, next) },
           revision: target.revision + 1,
-          revisionKind: 'scene',
+          // 코드를 치는 중이면 코드 편집과 같은 규칙(자동 실행 설정·긴 대기)을 따른다
+          revisionKind: typing ? 'code' : 'scene',
         },
       }
     })
@@ -570,7 +573,7 @@ export function App() {
     const id = (point ? editorAt(point) : null) ?? focusedId
     const api = id ? editorApis.current.get(id)?.current : null
     if (id && isVisual(docs[id])) {
-      toast('시각 모드에서는 코드가 객체에서 만들어집니다. 코드 객체를 추가하거나 코드 전용으로 전환하세요.', 'error')
+      toast('시각 모드에서는 이 코드가 객체에서 만들어집니다. 코드 객체를 골라 속성 패널에서 넣거나, 코드 전용으로 전환하세요.', 'error')
       return
     }
     if (!api) {
@@ -956,6 +959,19 @@ export function App() {
         { id: 'subtract', label: `${BOOLEAN_LABELS.subtract}로 묶기${many}`, icon: <Diff size={15} />, onSelect: wrapInto((input) => makeBoolean(input, 'subtract')) },
         { id: 'union', label: `${BOOLEAN_LABELS.union}로 묶기${many}`, icon: <SquareStack size={15} />, onSelect: wrapInto((input) => makeBoolean(input, 'union')) },
         { id: 'intersect', label: `${BOOLEAN_LABELS.intersect}로 묶기${many}`, icon: <Boxes size={15} />, onSelect: wrapInto((input) => makeBoolean(input, 'intersect')) },
+        ...(node.type === 'code' ? [] : [{
+          id: 'toCode',
+          label: '코드 객체로 바꾸기',
+          icon: <FileCode size={15} />,
+          onSelect: () => {
+            const result = toCodeNode(scene, nodeId)
+            if (!result.id) return
+            updateScene(docId, result.scene, [result.id])
+            toast(result.hiddenSkipped
+              ? `코드 객체로 바꿨습니다. 숨긴 하위 객체 ${result.hiddenSkipped}개는 코드에 담기지 않았습니다.`
+              : '코드 객체로 바꿨습니다. 객체로 되돌릴 수는 없습니다.', result.hiddenSkipped ? 'info' : 'success')
+          },
+        }]),
         ...(node.parent ? [{
           id: 'unparent',
           label: '최상위로 꺼내기',
@@ -1108,7 +1124,9 @@ export function App() {
           scene={doc.scene}
           layout={doc.layout}
           selection={doc.selection}
-          onScene={(next) => updateScene(focusedId, next)}
+          fontSize={Math.max(11, settings.fontSize - 2)}
+          onScene={(next, options) => updateScene(focusedId, next, undefined, options?.typing)}
+          onExpandCode={() => setDialog({ kind: 'codeNode' })}
         />
       )
     }
@@ -1316,6 +1334,7 @@ export function App() {
         <Modal
           title={DIALOG_TITLES[dialog.kind]}
           closing={dialogClosing}
+          wide={dialog.kind === 'codeNode'}
           onClose={() => closeDialog()}
           footer={dialog.kind === 'new' ? <><button className="button ghost" onClick={() => closeDialog()}>취소</button><button className="button primary" disabled={!newName.trim()} onClick={() => closeDialog(() => void createProject())}>만들기</button></>
             : dialog.kind === 'rename' ? <><button className="button danger" onClick={() => closeDialog(() => setDialog({ kind: 'delete', project: dialog.project }))}><Trash2 size={16} />삭제</button><span className="footer-spacer" /><button className="button ghost" onClick={() => closeDialog()}>취소</button><button className="button primary" disabled={!renameValue.trim()} onClick={() => closeDialog(() => void renameProject(dialog.project.id))}>저장</button></>
@@ -1388,6 +1407,29 @@ export function App() {
               toast={toast}
             />
           )}
+          {dialog.kind === 'codeNode' && (() => {
+            const target = focusedId ? docs[focusedId] : null
+            const nodeId = target?.selection[target.selection.length - 1]
+            const node = nodeId && target?.scene ? target.scene.nodes[nodeId] : null
+            if (!node || node.type !== 'code' || !target?.scene || !focusedId || !nodeId) {
+              return <p className="muted-copy">코드 객체를 고른 다음 다시 열어 주세요.</p>
+            }
+            return (
+              <div className="code-node-dialog">
+                <p className="muted-copy">
+                  <strong>{node.name}</strong> · module.exports = &#123; main &#125; 형태로 형상을 돌려주면 됩니다.
+                  고친 내용은 바로 미리보기에 반영됩니다.
+                </p>
+                <div className="code-node-editor">
+                  <CodeEditor
+                    value={node.code}
+                    fontSize={settings.fontSize}
+                    onChange={(code) => updateScene(focusedId, patchNode(target.scene!, nodeId, { code } as never), undefined, true)}
+                  />
+                </div>
+              </div>
+            )
+          })()}
           {dialog.kind === 'licenses' && <Licenses />}
           {dialog.kind === 'shortcuts' && <div className="shortcut-grid">
             <span>실행</span><kbd>Ctrl Enter</kbd><span>저장</span><kbd>Ctrl S</kbd><span>새 프로젝트</span><kbd>Ctrl N</kbd><span>프로젝트 검색</span><kbd>Ctrl P</kbd><span>프로젝트 패널</span><kbd>Ctrl B</kbd><span>출력 패널</span><kbd>Ctrl J</kbd><span>내보내기</span><kbd>Ctrl E</kbd><span>이미지로 렌더</span><kbd>Ctrl R</kbd><span>설정</span><kbd>Ctrl ,</kbd><span>자동완성</span><kbd>Ctrl Space</kbd><span>객체 복제</span><kbd>Ctrl D</kbd><span>이동·회전·크기 기즈모</span><kbd>G R H</kbd><span>객체 삭제</span><kbd>Delete</kbd><span>선택 해제 · 창 닫기</span><kbd>Esc</kbd>
