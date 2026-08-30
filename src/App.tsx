@@ -988,6 +988,15 @@ export function App() {
       : { label: `${name} 미리보기`, icon: <Eye size={14} /> }
   }
 
+  /** 지금 무엇을 할 수 있는지 뷰포트 아래에 알려 준다 */
+  const viewerHint = (target: OpenDoc, origin: Vec3 | null) => {
+    if (!target.scene) return '드래그: 회전 · Shift+드래그: 이동 · 휠/핀치: 확대'
+    if (!origin || !settings?.gizmo) return '객체를 탭하면 골라집니다 · 드래그: 회전 · 휠/핀치: 확대'
+    if (gizmoMode === 'rotate') return '색 손잡이 끌기: 그 축으로 회전 · 빈 곳 끌기: 화면 회전'
+    if (gizmoMode === 'scale') return '색 손잡이 끌기: 그 축 크기 · 빈 곳 끌기: 화면 회전'
+    return '색 손잡이 끌기: 그 축으로 이동 · 가운데 흰 점: 화면 따라 이동 · 빈 곳 끌기: 화면 회전'
+  }
+
   /** 고른 객체의 형상만 따로 뽑아 뷰포트에서 다른 색으로 그린다 */
   const highlightOf = (target: OpenDoc) => {
     const scene = target.scene
@@ -1175,7 +1184,7 @@ export function App() {
           autoFit={settings.autoFit}
           apiRef={viewerRefFor(projectId)}
         />
-        <div className="viewer-hint">드래그: 회전 · Shift+드래그: 이동 · 휠/핀치: 확대</div>
+        <div className="viewer-hint">{viewerHint(target, related.origin)}</div>
         {target.runState === 'error' && <div className="error-overlay"><X size={18} /><span>{target.runMessage}</span></div>}
       </div>
     )
