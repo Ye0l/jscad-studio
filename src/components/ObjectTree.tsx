@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   Box, ChevronDown, ChevronRight, Circle, Combine, Cylinder, Diff, Eye, EyeOff,
-  FileCode, GripVertical, Group, Layers, Plus, Ruler, SquareStack,
+  FileCode, GripVertical, Group, Layers, Plus, Redo2, Ruler, SquareStack, Undo2,
 } from 'lucide-react'
 import { ContextMenu, type MenuItem } from './ContextMenu'
 import { canHoldChildren, childIdsOf, flattenScene, moveNode } from '../scene/model'
@@ -17,8 +17,12 @@ interface Props {
   scene: Scene
   selection: string[]
   renamingId: string | null
+  canUndo: boolean
+  canRedo: boolean
+  onUndo: () => void
+  onRedo: () => void
   onSelect: (id: string, mode: SelectMode) => void
-  onScene: (next: Scene) => void
+  onScene: (next: Scene, options?: { coalesce?: string }) => void
   onMenu: (id: string, point: { x: number; y: number }) => void
   onRename: (id: string, name: string) => void
   onRenameEnd: () => void
@@ -58,7 +62,8 @@ const ADD_ITEMS: { kind: AddKind; label: string; icon: ReactNode }[] = [
 ]
 
 export function ObjectTree({
-  scene, selection, renamingId, onSelect, onScene, onMenu, onRename, onRenameEnd, onAdd,
+  scene, selection, renamingId, canUndo, canRedo, onUndo, onRedo,
+  onSelect, onScene, onMenu, onRename, onRenameEnd, onAdd,
 }: Props) {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set())
   const [drag, setDrag] = useState<DragState | null>(null)
@@ -151,6 +156,12 @@ export function ObjectTree({
           <Plus size={15} />객체 추가
         </button>
         <span className="tree-count">{Object.keys(scene.nodes).length}개</span>
+        <button className="icon-button tiny" onClick={onUndo} disabled={!canUndo} aria-label="되돌리기" title="되돌리기 (Ctrl Z)">
+          <Undo2 size={15} />
+        </button>
+        <button className="icon-button tiny" onClick={onRedo} disabled={!canRedo} aria-label="다시 실행" title="다시 실행 (Ctrl ⇧ Z)">
+          <Redo2 size={15} />
+        </button>
       </div>
 
       <div className="workplane-bar" title="새 객체가 놓이는 높이. 값을 바꿔도 이미 놓인 객체는 움직이지 않습니다">
@@ -164,7 +175,7 @@ export function ObjectTree({
             setWorkplaneText(event.target.value)
             const value = Number(event.target.value)
             if (event.target.value.trim() !== '' && Number.isFinite(value)) {
-              onScene({ ...scene, workplane: { ...scene.workplane, offset: value } })
+              onScene({ ...scene, workplane: { ...scene.workplane, offset: value } }, { coalesce: 'workplane' })
             }
           }}
           onBlur={() => setWorkplaneText(null)}

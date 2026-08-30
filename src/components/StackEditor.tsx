@@ -8,7 +8,7 @@ interface Props {
   scene: Scene | null
   layout: Layout
   selection: string[]
-  onScene: (next: Scene) => void
+  onScene: (next: Scene, options?: { coalesce?: string }) => void
   onSelect: (id: string) => void
   onCreate: () => void
 }
@@ -155,7 +155,9 @@ export function StackEditor({ scene, layout, selection, onScene, onSelect, onCre
                   value={round(thickness.value, 3)}
                   onChange={(event) => {
                     const value = Number(event.target.value)
-                    if (Number.isFinite(value) && value > 0) onScene(setParam(scene, childId, 'height', value))
+                    if (Number.isFinite(value) && value > 0) {
+                      onScene(setParam(scene, childId, 'height', value), { coalesce: `stack:${childId}` })
+                    }
                   }}
                 />
                 <small>두께</small>
@@ -168,7 +170,9 @@ export function StackEditor({ scene, layout, selection, onScene, onSelect, onCre
                   value={round(gap, 3)}
                   onChange={(event) => {
                     const value = Number(event.target.value)
-                    if (Number.isFinite(value)) onScene(setGap(scene, stack.id, childId, value))
+                    if (Number.isFinite(value)) {
+                      onScene(setGap(scene, stack.id, childId, value), { coalesce: `gap:${childId}` })
+                    }
                   }}
                 />
                 <small>간격</small>
