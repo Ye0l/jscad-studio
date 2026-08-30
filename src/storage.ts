@@ -16,6 +16,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   uiScale: 1,
   rotateSensitivity: 0.3,
   zoomSensitivity: 0.35,
+  autoFit: false,
   dock: null,
   git: null,
 }
