@@ -153,7 +153,18 @@ export function Viewer({
       userControl: { ...orbit.defaults.userControl },
       autoRotate: { ...orbit.defaults.autoRotate },
     }
-    // 선택 상자와 작업면은 한 번만 만들고 행렬만 바꿔 그린다 (매번 만들면 GPU 버퍼가 쌓인다)
+    // 격자·축·선택 상자·작업면은 한 번만 만들고 표시 여부와 행렬만 바꾼다
+    const guides = [
+      {
+        visuals: { drawCmd: 'drawGrid', show: true },
+        // 50mm 굵은 눈금 + 10mm 가는 눈금. 더 촘촘하면 확대했을 때 화면이 지저분해진다
+        size: [200, 200],
+        ticks: [50, 10],
+        color: GRID_COLOR,
+        subColor: GRID_SUB_COLOR,
+      },
+      { visuals: { drawCmd: 'drawAxis', show: true }, size: 100 },
+    ]
     const selection = {
       visuals: { drawCmd: 'drawLines', show: false },
       geometry: unitBoxLines(),
@@ -166,14 +177,55 @@ export function Viewer({
       color: PLANE_COLOR,
       model: boxMatrix([0, 0, 0], [1, 1, 0]),
     }
+    /*
+     * regl-renderer 는 entity 마다 draw command 를 한 번 만들어 캐시에 넣고 다시는 비우지 않는다.
+     * 형상을 다시 만들 때마다 entity 도 새로 생기므로, 그냥 두면 GPU 버퍼가 계속 쌓인다.
+     * 그래서 command 를 만들 때 쓰인 regl 자원을 entity 별로 적어 두었다가,
+     * 그 entity 가 화면에서 빠지면 함께 지운다. (죽은 command 는 다시 불리지 않는다)
+     */
+    const trackedResources = new Map<object, { destroy?: () => void }[]>()
+    let reglInstance: { destroy?: () => void; stats?: Record<string, number> } | null = null
+
+    const trackingRegl = (regl: any, created: { destroy?: () => void }[]) => new Proxy(regl, {
+      apply: (target: any, _thisArg: unknown, args: unknown[]) => target(...args),
+      get: (target: any, property: string | symbol) => {
+        const value = target[property]
+        if (typeof value !== 'function') return value
+        if (property !== 'buffer' && property !== 'elements' && property !== 'texture') return value.bind(target)
+        return (...args: unknown[]) => {
+          const resource = value.call(target, ...args)
+          created.push(resource)
+          return resource
+        }
+      },
+    })
+
+    const trackCommand = (factory: any) => (regl: any, entity: any) => {
+      reglInstance = regl
+      const created: { destroy?: () => void }[] = []
+      const command = factory(trackingRegl(regl, created), entity)
+      if (created.length) trackedResources.set(entity, created)
+      return command
+    }
+
+    /** 지금 그리는 목록에 없는 entity 의 GPU 자원을 놓아 준다 */
+    const retire = (keep: object[]) => {
+      const alive = new Set(keep)
+      for (const [entity, created] of trackedResources) {
+        if (alive.has(entity)) continue
+        for (const resource of created) resource.destroy?.()
+        trackedResources.delete(entity)
+      }
+    }
+
     const options: any = {
       glOptions: { container: host, attributes: { antialias: true, alpha: false } },
       camera,
       drawCommands: {
-        drawAxis: renderer.drawCommands.drawAxis,
-        drawGrid: renderer.drawCommands.drawGrid,
-        drawLines: renderer.drawCommands.drawLines,
-        drawMesh: renderer.drawCommands.drawMesh,
+        drawAxis: trackCommand(renderer.drawCommands.drawAxis),
+        drawGrid: trackCommand(renderer.drawCommands.drawGrid),
+        drawLines: trackCommand(renderer.drawCommands.drawLines),
+        drawMesh: trackCommand(renderer.drawCommands.drawMesh),
       },
       rendering: { background: [0.055, 0.063, 0.078, 1] },
       entities: [],
@@ -285,12 +337,15 @@ export function Viewer({
       frame = requestAnimationFrame(animate)
     }
     frame = requestAnimationFrame(animate)
-    runtimeRef.current = { renderer, cameraApi, orbit, camera, controls, options, render, selection, plane, guides: null }
+    runtimeRef.current = { renderer, cameraApi, orbit, camera, controls, options, render, selection, plane, guides, retire }
 
     return () => {
       cancelAnimationFrame(frame)
       observer.disconnect()
       runtimeRef.current = null
+      // 탭을 닫으면 WebGL 컨텍스트째로 놓아 준다 (안 그러면 컨텍스트가 그대로 남는다)
+      retire([])
+      reglInstance?.destroy?.()
       host.replaceChildren()
     }
   }, [])
@@ -298,25 +353,17 @@ export function Viewer({
   useEffect(() => {
     const runtime = runtimeRef.current
     if (!runtime) return
-    const { renderer, options, selection, plane } = runtime
+    const { renderer, options, selection, plane, guides, retire } = runtime
     const solids = renderer.entitiesFromSolids({ color: SOLID_COLOR }, geometries)
     // 형상 자체가 색을 들고 있으면 그 색이 이긴다. 고른 객체는 얕은 복사로 색만 덮어쓴다
     const picked = renderer.entitiesFromSolids(
       { color: SELECTED_COLOR },
       (highlighted ?? []).map((item) => ({ ...(item as object), color: SELECTED_COLOR })),
     )
-    const guides = [
-      {
-        visuals: { drawCmd: 'drawGrid', show: showGrid },
-        // 50mm 굵은 눈금 + 10mm 가는 눈금. 더 촘촘하면 확대했을 때 화면이 지저분해진다
-        size: [200, 200],
-        ticks: [50, 10],
-        color: GRID_COLOR,
-        subColor: GRID_SUB_COLOR,
-      },
-      { visuals: { drawCmd: 'drawAxis', show: showGrid }, size: 100 },
-    ]
+    for (const guide of guides) guide.visuals.show = showGrid
     options.entities = [...guides, plane, selection, ...solids, ...picked]
+    // 방금 밀려난 형상의 GPU 자원을 바로 놓아 준다
+    retire(options.entities)
   }, [geometries, highlighted, showGrid])
 
   // 선택 상자와 작업면은 행렬만 갈아 끼운다
